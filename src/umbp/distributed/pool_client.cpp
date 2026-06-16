@@ -909,12 +909,21 @@ std::vector<bool> PoolClient::BatchGet(const std::vector<std::string>& keys,
     return results;
   }
 
+  const bool batchget_timing = std::getenv("UMBP_BATCHGET_TIMING") != nullptr;
+  const auto route_get_t0 = std::chrono::steady_clock::now();
   std::vector<std::optional<RouteGetResult>> routes;
   std::unordered_set<std::string> excludes;
   auto status = master_client_->BatchRouteGet(keys, excludes, &routes);
   if (!status.ok()) {
     MORI_UMBP_ERROR("[PoolClient] BatchGet: BatchRouteGet failed: {}", status.error_message());
     return results;
+  }
+  if (batchget_timing) {
+    const double ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+                          std::chrono::steady_clock::now() - route_get_t0)
+                          .count();
+    MORI_UMBP_INFO("[BatchGetTiming] stage=BatchRouteGet keys={} elapsed_ms={:.3f}", keys.size(),
+                   ms);
   }
   if (routes.size() < keys.size()) {
     routes.resize(keys.size());
@@ -1417,10 +1426,22 @@ void PoolClient::ExecuteRemoteBatchGet(const std::vector<BatchGetItem>& items,
     return;
   }
 
+  const bool batchget_timing = std::getenv("UMBP_BATCHGET_TIMING") != nullptr;
+  auto stage_t0 = std::chrono::steady_clock::now();
+  auto mark_stage_ms = [&]() {
+    const auto now = std::chrono::steady_clock::now();
+    const double ms =
+        std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(now - stage_t0)
+            .count();
+    stage_t0 = now;
+    return ms;
+  };
+
   std::vector<RemoteGetEntry> entries;
   if (!PrepareRemoteGetEntries(items, stub, &entries, results)) {
     return;
   }
+  const double resolve_ms = batchget_timing ? mark_stage_ms() : 0.0;
 
   std::vector<TransferInstruction> transfers;
   uint64_t staging_bytes = 0;
@@ -1434,9 +1455,20 @@ void PoolClient::ExecuteRemoteBatchGet(const std::vector<BatchGetItem>& items,
     }
     return;
   }
+  const double build_ms = batchget_timing ? mark_stage_ms() : 0.0;
 
   ExecuteRemoteGetTransfers(entries, transfers, staging_bytes);
+  const double transfer_ms = batchget_timing ? mark_stage_ms() : 0.0;
+
   FinalizeRemoteGetEntries(entries, results);
+  if (batchget_timing) {
+    const double finalize_ms = mark_stage_ms();
+    MORI_UMBP_INFO(
+        "[BatchGetTiming] stage=RemoteBatchGet node='{}' items={} staging_bytes={} "
+        "resolve_ms={:.3f} build_ms={:.3f} transfer_ms={:.3f} finalize_ms={:.3f} total_ms={:.3f}",
+        items.front().route.node_id, items.size(), staging_bytes, resolve_ms, build_ms, transfer_ms,
+        finalize_ms, resolve_ms + build_ms + transfer_ms + finalize_ms);
+  }
 }
 
 bool PoolClient::PrepareRemoteGetEntries(const std::vector<BatchGetItem>& items,
@@ -1444,17 +1476,37 @@ bool PoolClient::PrepareRemoteGetEntries(const std::vector<BatchGetItem>& items,
                                          std::vector<RemoteGetEntry>* entries,
                                          std::vector<bool>* results) {
   entries->clear();
+
+  const bool batchget_timing = std::getenv("UMBP_BATCHGET_TIMING") != nullptr;
+  auto stage_t0 = std::chrono::steady_clock::now();
+  auto mark_stage_ms = [&]() {
+    const auto now = std::chrono::steady_clock::now();
+    const double ms =
+        std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(now - stage_t0)
+            .count();
+    stage_t0 = now;
+    return ms;
+  };
+
   ::umbp::BatchResolveKeysRequest resolve_req;
   for (const auto& item : items) resolve_req.add_keys(*item.key);
+  const double build_ms = batchget_timing ? mark_stage_ms() : 0.0;
 
   ::umbp::BatchResolveKeysResponse resolve_resp;
   grpc::ClientContext resolve_ctx;
   auto resolve_status = stub->BatchResolveKeys(&resolve_ctx, resolve_req, &resolve_resp);
+  const double rpc_ms = batchget_timing ? mark_stage_ms() : 0.0;
   if (!resolve_status.ok() || resolve_resp.entries_size() != static_cast<int>(items.size())) {
     MORI_UMBP_WARN("[PoolClient] BatchResolveKeys failed on {}: {}", items.front().route.node_id,
                    resolve_status.error_message());
     for (const auto& item : items) {
       (*results)[item.index] = false;
+    }
+    if (batchget_timing) {
+      MORI_UMBP_INFO(
+          "[BatchGetTiming] stage=ResolveKeys.detail items={} build_ms={:.3f} rpc_ms={:.3f} "
+          "parse_ms=0.000 status=error",
+          items.size(), build_ms, rpc_ms);
     }
     return false;
   }
@@ -1485,6 +1537,14 @@ bool PoolClient::PrepareRemoteGetEntries(const std::vector<BatchGetItem>& items,
     entry.item = &item;
     entry.plan = std::move(plan);
     entries->push_back(std::move(entry));
+  }
+
+  if (batchget_timing) {
+    const double parse_ms = mark_stage_ms();
+    MORI_UMBP_INFO(
+        "[BatchGetTiming] stage=ResolveKeys.detail items={} build_ms={:.3f} rpc_ms={:.3f} "
+        "parse_ms={:.3f} total_ms={:.3f}",
+        items.size(), build_ms, rpc_ms, parse_ms, build_ms + rpc_ms + parse_ms);
   }
 
   return !entries->empty();

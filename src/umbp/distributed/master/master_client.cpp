@@ -309,16 +309,38 @@ grpc::Status MasterClient::BatchRouteGet(const std::vector<std::string>& keys,
     return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "out is null");
   }
   out->clear();
+
+  const bool batchget_timing = std::getenv("UMBP_BATCHGET_TIMING") != nullptr;
+  auto stage_t0 = std::chrono::steady_clock::now();
+  auto mark_stage_ms = [&]() {
+    const auto now = std::chrono::steady_clock::now();
+    const double ms =
+        std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(now - stage_t0)
+            .count();
+    stage_t0 = now;
+    return ms;
+  };
+
   ::umbp::BatchRouteGetRequest req;
   req.set_node_id(config_.node_id);
   for (const auto& k : keys) req.add_keys(k);
   FillExcludeNodes(req.mutable_exclude_nodes(), exclude_nodes);
+  const double build_ms = batchget_timing ? mark_stage_ms() : 0.0;
 
   ::umbp::BatchRouteGetResponse resp;
   grpc::ClientContext ctx;
   auto status = GetStub(stub_.get())->BatchRouteGet(&ctx, req, &resp);
   _rpc_timer.SetStatus(status);
-  if (!status.ok()) return status;
+  const double rpc_ms = batchget_timing ? mark_stage_ms() : 0.0;
+  if (!status.ok()) {
+    if (batchget_timing) {
+      MORI_UMBP_INFO(
+          "[BatchGetTiming] stage=BatchRouteGet.detail keys={} build_ms={:.3f} rpc_ms={:.3f} "
+          "parse_ms=0.000 status=error",
+          keys.size(), build_ms, rpc_ms);
+    }
+    return status;
+  }
 
   out->resize(static_cast<size_t>(resp.entries_size()));
   for (int i = 0; i < resp.entries_size(); ++i) {
@@ -330,6 +352,13 @@ grpc::Status MasterClient::BatchRouteGet(const std::vector<std::string>& keys,
     r.size = e.size();
     r.peer_address = e.peer_address();
     (*out)[i] = std::move(r);
+  }
+  if (batchget_timing) {
+    const double parse_ms = mark_stage_ms();
+    MORI_UMBP_INFO(
+        "[BatchGetTiming] stage=BatchRouteGet.detail keys={} build_ms={:.3f} rpc_ms={:.3f} "
+        "parse_ms={:.3f} total_ms={:.3f}",
+        keys.size(), build_ms, rpc_ms, parse_ms, build_ms + rpc_ms + parse_ms);
   }
   return grpc::Status::OK;
 }

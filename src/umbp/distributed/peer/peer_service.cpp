@@ -504,8 +504,21 @@ class PeerServiceServer::UMBPPeerServiceImpl final : public ::umbp::UMBPPeer::Se
       }
       return grpc::Status::OK;
     }
+    const bool batchget_timing = std::getenv("UMBP_BATCHGET_TIMING") != nullptr;
+    auto stage_t0 = std::chrono::steady_clock::now();
+    auto mark_stage_ms = [&]() {
+      const auto now = std::chrono::steady_clock::now();
+      const double ms =
+          std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(now - stage_t0)
+              .count();
+      stage_t0 = now;
+      return ms;
+    };
+
     std::vector<std::string> keys(request->keys().begin(), request->keys().end());
     auto resolved = dram_alloc_->BatchResolve(keys);
+    const double resolve_ms = batchget_timing ? mark_stage_ms() : 0.0;
+
     uint64_t total_bytes = 0;
     for (const auto& r : resolved) {
       auto* out = response->add_entries();
@@ -514,6 +527,13 @@ class PeerServiceServer::UMBPPeerServiceImpl final : public ::umbp::UMBPPeer::Se
       FillPagesAndDescs(out, r.pages, dram_alloc_->PageSize(), r.descs);
       out->set_size(r.size);
       total_bytes += r.size;
+    }
+    const double fill_ms = batchget_timing ? mark_stage_ms() : 0.0;
+    if (batchget_timing) {
+      MORI_UMBP_INFO(
+          "[BatchGetTiming] stage=ResolveKeys.server keys={} resolve_ms={:.3f} fill_ms={:.3f} "
+          "total_ms={:.3f}",
+          keys.size(), resolve_ms, fill_ms, resolve_ms + fill_ms);
     }
     RecordInboundGet(total_bytes, "remote");
     return grpc::Status::OK;

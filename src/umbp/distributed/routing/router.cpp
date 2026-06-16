@@ -22,6 +22,8 @@
 #include "umbp/distributed/routing/router.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <unordered_map>
 
 #include "mori/utils/mori_log.hpp"
@@ -95,14 +97,28 @@ std::vector<std::optional<RouteGetResolution>> Router::BatchRouteGet(
     const std::unordered_set<std::string>& exclude_nodes) {
   std::vector<std::optional<RouteGetResolution>> results(keys.size());
 
+  const bool batchget_timing = std::getenv("UMBP_BATCHGET_TIMING") != nullptr;
+  auto stage_t0 = std::chrono::steady_clock::now();
+  auto mark_stage_ms = [&]() {
+    const auto now = std::chrono::steady_clock::now();
+    const double ms =
+        std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(now - stage_t0)
+            .count();
+    stage_t0 = now;
+    return ms;
+  };
+
   // Snapshot peer addresses once for the whole batch.  Master assumes
   // the snapshot is stable for the duration of one BatchRouteGet.
   std::unordered_map<std::string, std::string> node_to_peer;
   for (const auto& client : registry_.GetAliveClients()) {
     node_to_peer[client.node_id] = client.peer_address;
   }
+  const double snapshot_ms = batchget_timing ? mark_stage_ms() : 0.0;
 
   auto all_locs = index_.BatchLookupForRouteGet(keys, exclude_nodes, lease_duration_);
+  const double lookup_ms = batchget_timing ? mark_stage_ms() : 0.0;
+
   for (size_t i = 0; i < keys.size(); ++i) {
     auto& locations = all_locs[i];
     if (locations.empty()) {
@@ -120,6 +136,13 @@ std::vector<std::optional<RouteGetResolution>> Router::BatchRouteGet(
     MORI_UMBP_DEBUG("[Router] BatchRouteGet key='{}': selected node={}, tier={}, size={}", keys[i],
                     selected.node_id, TierTypeName(selected.tier), selected.size);
     results[i] = std::move(out);
+  }
+  if (batchget_timing) {
+    const double select_ms = mark_stage_ms();
+    MORI_UMBP_INFO(
+        "[BatchGetTiming] stage=BatchRouteGet.server keys={} snapshot_ms={:.3f} "
+        "lookup_ms={:.3f} select_ms={:.3f} total_ms={:.3f}",
+        keys.size(), snapshot_ms, lookup_ms, select_ms, snapshot_ms + lookup_ms + select_ms);
   }
   return results;
 }
