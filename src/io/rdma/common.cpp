@@ -26,6 +26,7 @@
 #include <cstdlib>
 #include <limits>
 #include <numeric>
+#include <sstream>
 #include <thread>
 #include <utility>
 
@@ -526,6 +527,23 @@ RdmaOpRet RdmaBatchReadWrite(const EpPairVec& eps,
   }
   if (postBatchSize <= 0) postBatchSize = 1;
   int numPostBatch = (mergedWrCount + postBatchSize - 1) / postBatchSize;
+
+  {
+    std::vector<int> wrPerEp(epNum, 0);
+    for (int i = 0; i < numPostBatch; i++) {
+      int epId = i % epNum;
+      int st = i * postBatchSize;
+      int end = std::min(static_cast<size_t>(st) + postBatchSize, mergedWrCount);
+      wrPerEp[epId] += end - st;
+    }
+    std::ostringstream dist;
+    for (size_t i = 0; i < epNum; i++) {
+      if (i > 0) dist << ", ";
+      dist << "qp[" << i << "]=" << wrPerEp[i] << "wrs";
+    }
+    MORI_IO_INFO("BatchReadWrite id={} original_ops={} merged_wrs={} eps={} post_batch={}: {}", id,
+                 batchSize, mergedWrCount, epNum, postBatchSize, dist.str());
+  }
 
   std::vector<int> epWrsSinceSignal(epNum, 0);
   std::vector<size_t> epMergedSinceSignal(epNum, 0);

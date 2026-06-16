@@ -26,6 +26,7 @@
 
 #include <cstring>
 #include <future>
+#include <sstream>
 #include <vector>
 
 #include "mori/io/logging.hpp"
@@ -191,6 +192,18 @@ RdmaOpRet MultithreadExecutor::RdmaBatchReadWrite(const ExecutorReq& req) {
 
   auto splits = SplitWork(req);
   int numSplits = splits.size();
+
+  {
+    std::ostringstream dist;
+    for (int i = 0; i < numSplits; i++) {
+      if (i > 0) dist << ", ";
+      dist << "qp[" << i << "]=[" << splits[i].first << "," << splits[i].second << ")("
+           << (splits[i].second - splits[i].first) << "ops)";
+    }
+    MORI_IO_INFO("BatchReadWrite id={} total_ops={} eps={} active_qps={}: {}", req.id,
+                 req.sizes.size(), req.eps.size(), numSplits, dist.str());
+  }
+
   std::vector<std::future<RdmaOpRet>> futs;
 
   for (int i = 0; i < numSplits; i++) {

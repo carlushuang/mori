@@ -406,7 +406,9 @@ class MasterServer::UMBPMasterServiceImpl final : public ::umbp::UMBPMaster::Ser
     std::vector<std::string> keys(request->keys().begin(), request->keys().end());
     std::unordered_set<std::string> excludes(request->exclude_nodes().begin(),
                                              request->exclude_nodes().end());
+    auto t0 = std::chrono::steady_clock::now();
     auto results = router_.BatchRouteGet(keys, request->node_id(), excludes);
+    auto t1 = std::chrono::steady_clock::now();
     for (auto& opt : results) {
       auto* entry = response->add_entries();
       if (!opt.has_value()) {
@@ -424,6 +426,11 @@ class MasterServer::UMBPMasterServiceImpl final : public ::umbp::UMBPMaster::Ser
                              {{"node", opt->location.node_id}});
       }
     }
+    auto t2 = std::chrono::steady_clock::now();
+    auto router_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+    auto loop_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+    MORI_UMBP_INFO("[Server] BatchRouteGet keys={} router_us={} loop_us={}", keys.size(), router_us,
+                   loop_us);
     return grpc::Status::OK;
   }
 

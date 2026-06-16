@@ -171,6 +171,7 @@ void IBVerbsDeviceContext::ConnectEndpoint(const RdmaEndpointHandle& local,
   attr.dest_qp_num = remote.qpn;
   attr.rq_psn = 0;
   attr.max_dest_rd_atomic = devAttr->orig_attr.max_qp_rd_atom;
+  MORI_APP_INFO("QP RTR: max_dest_rd_atomic={}", attr.max_dest_rd_atomic);
   attr.min_rnr_timer = 12;
   attr.ah_attr.src_path_bits = 0;
   attr.ah_attr.port_num = local.portId;
@@ -214,6 +215,7 @@ void IBVerbsDeviceContext::ConnectEndpoint(const RdmaEndpointHandle& local,
   attr.retry_cnt = 7;
   attr.rnr_retry = 7;
   attr.max_rd_atomic = devAttr->orig_attr.max_qp_init_rd_atom;
+  MORI_APP_INFO("QP RTS: max_rd_atomic={}", attr.max_rd_atomic);
   flags = IBV_QP_STATE | IBV_QP_SQ_PSN | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY |
           IBV_QP_MAX_QP_RD_ATOMIC;
   SYSCALL_RETURN_ZERO(ibv_modify_qp(qp, &attr, flags));

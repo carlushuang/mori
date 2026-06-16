@@ -996,13 +996,39 @@ std::vector<bool> PoolClient::BatchGet(const std::vector<std::string>& keys,
                      local_get_idx.size(), tot, nthr, sec * 1000.0,
                      tot / (sec > 0 ? sec : 1e-12) / (1024.0 * 1024 * 1024));
     }
+    if (batchget_timing) {
+      const double ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+                            std::chrono::steady_clock::now() - t0)
+                            .count();
+      MORI_UMBP_INFO("[BatchGetTiming] stage=LocalDRAM keys={} elapsed_ms={:.3f}",
+                     local_get_idx.size(), ms);
+    }
   }
 
-  for (auto& [node_id, items] : remote_groups) {
-    ProcessRemoteBatchGet(items, &results);
+  {
+    const auto t0 = std::chrono::steady_clock::now();
+    for (auto& [node_id, items] : remote_groups) {
+      ProcessRemoteBatchGet(items, &results);
+    }
+    if (batchget_timing && !remote_groups.empty()) {
+      const double ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+                            std::chrono::steady_clock::now() - t0)
+                            .count();
+      MORI_UMBP_INFO("[BatchGetTiming] stage=RemoteDRAM keys={} elapsed_ms={:.3f}", keys.size(),
+                     ms);
+    }
   }
-  for (auto& [node_id, items] : ssd_remote_groups) {
-    ProcessRemoteSsdBatchGet(items, &results);
+  {
+    const auto t0 = std::chrono::steady_clock::now();
+    for (auto& [node_id, items] : ssd_remote_groups) {
+      ProcessRemoteSsdBatchGet(items, &results);
+    }
+    if (batchget_timing && !ssd_remote_groups.empty()) {
+      const double ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+                            std::chrono::steady_clock::now() - t0)
+                            .count();
+      MORI_UMBP_INFO("[BatchGetTiming] stage=RemoteSSD keys={} elapsed_ms={:.3f}", keys.size(), ms);
+    }
   }
 
   for (size_t i = 0; i < keys.size(); ++i) {
@@ -1637,6 +1663,8 @@ void PoolClient::ExecuteRemoteGetTransfers(std::vector<RemoteGetEntry>& entries,
   std::unique_lock<std::mutex> staging_lock(staging_mutex_, std::defer_lock);
   if (staging_bytes > 0) staging_lock.lock();
 
+  auto t0 = std::chrono::steady_clock::now();
+
   std::vector<TransferInstruction> active_transfers;
   active_transfers.reserve(transfers.size());
   for (const auto& transfer : transfers) {
@@ -1650,38 +1678,73 @@ void PoolClient::ExecuteRemoteGetTransfers(std::vector<RemoteGetEntry>& entries,
   }
 
   const size_t N = active_transfers.size();
-  mori::io::MemDescVec local_descs(N), remote_descs(N);
-  mori::io::BatchSizeVec local_offsets(N), remote_offsets(N), sizes_v(N);
-  std::vector<mori::io::TransferStatus> statuses(N);
-  mori::io::TransferStatusPtrVec status_ptrs(N);
-  mori::io::TransferUniqueIdVec ids(N);
+
+  // Group transfers sharing the same (local, remote) memory descriptor into a
+  // single BatchRead call so all ops are visible to the QP distributor at once.
+  struct Group {
+    mori::io::MemoryDesc local_desc;
+    mori::io::MemoryDesc remote_desc;
+    mori::io::SizeVec local_offsets;
+    mori::io::SizeVec remote_offsets;
+    mori::io::SizeVec sizes;
+    std::vector<size_t> transfer_indices;
+  };
+
+  std::unordered_map<std::string, size_t> group_map;
+  std::vector<Group> groups;
   for (size_t i = 0; i < N; ++i) {
-    const auto& transfer = active_transfers[i];
-    remote_descs[i] = transfer.remote_desc;
-    local_descs[i] = transfer.local_desc;
-    remote_offsets[i].push_back(transfer.remote_offset);
-    local_offsets[i].push_back(transfer.local_offset);
-    sizes_v[i].push_back(transfer.size);
-    status_ptrs[i] = &statuses[i];
-    ids[i] = io_engine_->AllocateTransferUniqueId();
+    const auto& tr = active_transfers[i];
+    std::string key = tr.local_desc.engineKey + ":" + std::to_string(tr.local_desc.id) + "/" +
+                      tr.remote_desc.engineKey + ":" + std::to_string(tr.remote_desc.id);
+    auto [it, inserted] = group_map.emplace(key, groups.size());
+    if (inserted) {
+      groups.push_back({tr.local_desc, tr.remote_desc, {}, {}, {}, {}});
+    }
+    auto& g = groups[it->second];
+    g.local_offsets.push_back(static_cast<size_t>(tr.local_offset));
+    g.remote_offsets.push_back(static_cast<size_t>(tr.remote_offset));
+    g.sizes.push_back(static_cast<size_t>(tr.size));
+    g.transfer_indices.push_back(i);
   }
 
-  io_engine_->BatchRead(local_descs, local_offsets, remote_descs, remote_offsets, sizes_v,
+  const size_t G = groups.size();
+  mori::io::MemDescVec local_descs(G), remote_descs(G);
+  mori::io::BatchSizeVec local_offsets_v(G), remote_offsets_v(G), sizes_v(G);
+  std::vector<mori::io::TransferStatus> statuses(G);
+  mori::io::TransferStatusPtrVec status_ptrs(G);
+  mori::io::TransferUniqueIdVec ids(G);
+  for (size_t g = 0; g < G; ++g) {
+    local_descs[g] = groups[g].local_desc;
+    remote_descs[g] = groups[g].remote_desc;
+    local_offsets_v[g] = std::move(groups[g].local_offsets);
+    remote_offsets_v[g] = std::move(groups[g].remote_offsets);
+    sizes_v[g] = std::move(groups[g].sizes);
+    status_ptrs[g] = &statuses[g];
+    ids[g] = io_engine_->AllocateTransferUniqueId();
+  }
+
+  auto t1 = std::chrono::steady_clock::now();
+
+  io_engine_->BatchRead(local_descs, local_offsets_v, remote_descs, remote_offsets_v, sizes_v,
                         status_ptrs, ids);
-  for (size_t i = 0; i < active_transfers.size(); ++i) {
-    statuses[i].Wait();
-    if (!statuses[i].Succeeded()) {
-      const auto& tr = active_transfers[i];
-      auto& entry = entries[tr.entry_index];
-      MORI_UMBP_ERROR(
-          "RemoteGet BatchRead failed: code={} msg='{}' peer_engine='{}' key='{}' "
-          "size={} local_off={} remote_off={} use_staging={}",
-          statuses[i].CodeUint32(), statuses[i].Message(), tr.remote_desc.engineKey,
-          (entry.item && entry.item->key) ? *entry.item->key : std::string{"<null>"}, tr.size,
-          tr.local_offset, tr.remote_offset, entry.use_staging);
-      entry.failed = true;
+  for (size_t g = 0; g < G; ++g) {
+    statuses[g].Wait();
+    if (!statuses[g].Succeeded()) {
+      for (size_t i : groups[g].transfer_indices) {
+        const auto& tr = active_transfers[i];
+        auto& entry = entries[tr.entry_index];
+        MORI_UMBP_ERROR(
+            "RemoteGet BatchRead failed: code={} msg='{}' peer_engine='{}' key='{}' "
+            "size={} local_off={} remote_off={} use_staging={}",
+            statuses[g].CodeUint32(), statuses[g].Message(), tr.remote_desc.engineKey,
+            (entry.item && entry.item->key) ? *entry.item->key : std::string{"<null>"}, tr.size,
+            tr.local_offset, tr.remote_offset, entry.use_staging);
+        entry.failed = true;
+      }
     }
   }
+
+  auto t2 = std::chrono::steady_clock::now();
 
   if (staging_lock.owns_lock()) {
     for (auto& entry : entries) {
@@ -1699,6 +1762,15 @@ void PoolClient::ExecuteRemoteGetTransfers(std::vector<RemoteGetEntry>& entries,
     }
     staging_lock.unlock();
   }
+
+  auto t3 = std::chrono::steady_clock::now();
+  auto pre_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+  auto read_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+  auto copy_us = std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
+  MORI_UMBP_INFO(
+      "[PoolClient] ExecuteRemoteGetTransfers transfers={} groups={} pre_us={} batch_read_us={} "
+      "staging_copy_us={}",
+      N, G, pre_us, read_us, copy_us);
 }
 
 void PoolClient::FinalizeRemoteGetEntries(std::vector<RemoteGetEntry>& entries,

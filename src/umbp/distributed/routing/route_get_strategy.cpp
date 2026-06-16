@@ -78,8 +78,8 @@ Location RandomRouteGetStrategy::Select(const std::vector<Location>& locations,
 
   if (locations.size() == 1) {
     const auto& single = locations[0];
-    MORI_UMBP_DEBUG("[RouteGetStrategy] single candidate selected node={} tier={} size={}",
-                    single.node_id, TierTypeName(single.tier), single.size);
+    // MORI_UMBP_DEBUG("[RouteGetStrategy] single candidate selected node={} tier={} size={}",
+    //                 single.node_id, TierTypeName(single.tier), single.size);
     return single;
   }
 
@@ -87,10 +87,10 @@ Location RandomRouteGetStrategy::Select(const std::vector<Location>& locations,
   std::uniform_int_distribution<size_t> dist(0, locations.size() - 1);
   size_t choice = dist(rng);
   const auto& selected = locations[choice];
-  MORI_UMBP_DEBUG(
-      "[RouteGetStrategy] {} candidates -> choice={} node={} tier={} size={}, candidates=[{}]",
-      locations.size(), choice, selected.node_id, TierTypeName(selected.tier), selected.size,
-      SummarizeLocations(locations));
+  // MORI_UMBP_DEBUG(
+  //     "[RouteGetStrategy] {} candidates -> choice={} node={} tier={} size={}, candidates=[{}]",
+  //     locations.size(), choice, selected.node_id, TierTypeName(selected.tier), selected.size,
+  //     SummarizeLocations(locations));
   return selected;
 }
 
@@ -115,11 +115,11 @@ Location TierPriorityRouteGetStrategy::Select(const std::vector<Location>& locat
 
   size_t choice = PickRandomIndex(best_tier_indices);
   const auto& selected = locations[choice];
-  MORI_UMBP_DEBUG(
-      "[TierPriorityRouteGetStrategy] {} candidates -> best_tier={} ({} replicas) choice node={} "
-      "tier={} size={}, candidates=[{}]",
-      locations.size(), TierTypeName(selected.tier), best_tier_indices.size(), selected.node_id,
-      TierTypeName(selected.tier), selected.size, SummarizeLocations(locations));
+  // MORI_UMBP_DEBUG(
+  //     "[TierPriorityRouteGetStrategy] {} candidates -> best_tier={} ({} replicas) choice node={}
+  //     " "tier={} size={}, candidates=[{}]", locations.size(), TierTypeName(selected.tier),
+  //     best_tier_indices.size(), selected.node_id, TierTypeName(selected.tier), selected.size,
+  //     SummarizeLocations(locations));
   return selected;
 }
 
