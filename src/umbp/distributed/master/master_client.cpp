@@ -355,10 +355,14 @@ grpc::Status MasterClient::BatchRouteGet(const std::vector<std::string>& keys,
   }
   if (batchget_timing) {
     const double parse_ms = mark_stage_ms();
+    // rpc_ms is the blocking call: it already includes client-side wire-serialize of req and
+    // wire-deserialize of resp. req_bytes/resp_bytes quantify how much payload that hop moves,
+    // explaining the gap between rpc_ms and the server's router_us+loop_us.
     MORI_UMBP_INFO(
         "[BatchGetTiming] stage=BatchRouteGet.detail keys={} build_ms={:.3f} rpc_ms={:.3f} "
-        "parse_ms={:.3f} total_ms={:.3f}",
-        keys.size(), build_ms, rpc_ms, parse_ms, build_ms + rpc_ms + parse_ms);
+        "parse_ms={:.3f} total_ms={:.3f} req_bytes={} resp_bytes={}",
+        keys.size(), build_ms, rpc_ms, parse_ms, build_ms + rpc_ms + parse_ms, req.ByteSizeLong(),
+        resp.ByteSizeLong());
   }
   return grpc::Status::OK;
 }

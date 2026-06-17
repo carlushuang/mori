@@ -25,6 +25,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -403,6 +404,10 @@ class MasterServer::UMBPMasterServiceImpl final : public ::umbp::UMBPMaster::Ser
   grpc::Status BatchRouteGet(grpc::ServerContext* /*ctx*/,
                              const ::umbp::BatchRouteGetRequest* request,
                              ::umbp::BatchRouteGetResponse* response) override {
+    const bool batchget_timing = std::getenv("UMBP_BATCHGET_TIMING") != nullptr;
+    // t_enter..t0 covers request deserialization (proto repeated fields -> vectors/set),
+    // which previously sat outside every timer.
+    auto t_enter = std::chrono::steady_clock::now();
     std::vector<std::string> keys(request->keys().begin(), request->keys().end());
     std::unordered_set<std::string> excludes(request->exclude_nodes().begin(),
                                              request->exclude_nodes().end());
@@ -427,10 +432,27 @@ class MasterServer::UMBPMasterServiceImpl final : public ::umbp::UMBPMaster::Ser
       }
     }
     auto t2 = std::chrono::steady_clock::now();
+    auto deser_us = std::chrono::duration_cast<std::chrono::microseconds>(t0 - t_enter).count();
     auto router_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     auto loop_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
-    MORI_UMBP_INFO("[Server] BatchRouteGet keys={} router_us={} loop_us={}", keys.size(), router_us,
-                   loop_us);
+    MORI_UMBP_INFO("[Server] BatchRouteGet keys={} deser_us={} router_us={} loop_us={}",
+                   keys.size(), deser_us, router_us, loop_us);
+    if (batchget_timing) {
+      // The actual gRPC response serialization happens AFTER this handler returns, so it is
+      // invisible to router_us/loop_us. ByteSizeLong() walks the whole message exactly as the
+      // serializer does, so it is a tight proxy for that hidden cost and also reports the wire
+      // payload size that the network must move back to the client.
+      auto t3 = std::chrono::steady_clock::now();
+      const size_t resp_bytes = response->ByteSizeLong();
+      auto t4 = std::chrono::steady_clock::now();
+      auto serialize_proxy_us =
+          std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3).count();
+      MORI_UMBP_INFO(
+          "[BatchGetTiming] stage=BatchRouteGet.server.io keys={} entries={} deser_us={} "
+          "resp_bytes={} serialize_proxy_us={} (resp serialize+send happens after return, "
+          "outside router_us/loop_us)",
+          keys.size(), response->entries_size(), deser_us, resp_bytes, serialize_proxy_us);
+    }
     return grpc::Status::OK;
   }
 
