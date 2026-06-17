@@ -362,7 +362,7 @@ bool PoolClient::Init() {
 
     rdma_cfg.qpPerTransfer = mori::env::GetPositiveIntOr("MORI_UMBP_QP_PER_TRANSFER", 4);
     rdma_cfg.enableTransferChunking = true;
-    rdma_cfg.numNicsPerTransfer = 4;
+    rdma_cfg.numNicsPerTransfer = mori::env::GetPositiveIntOr("MORI_UMBP_NUM_NICS_PER_TRANSFER", 4);
     io_engine_->CreateBackend(mori::io::BackendType::RDMA, rdma_cfg);
 
     staging_buffer_ = std::make_unique<char[]>(config_.staging_buffer_size);
