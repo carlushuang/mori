@@ -42,6 +42,7 @@
 #include "mori/utils/mori_log.hpp"
 #include "umbp/common/env_time.h"
 #include "umbp/distributed/master/master_metrics.h"
+#include "umbp/distributed/peer/batch_resolve_codec.h"
 #include "umbp/distributed/peer/peer_dram_allocator.h"
 #include "umbp/distributed/peer/peer_service.h"
 #include "umbp/distributed/peer/peer_ssd_manager.h"
@@ -309,21 +310,6 @@ PeerDramAllocator::TierConfig BuildDramTierConfig(const std::vector<ExportableDr
 PoolClient::SlotPlan FromAllocateSlotResponse(const ::umbp::AllocateSlotResponse& resp) {
   PoolClient::SlotPlan p;
   p.slot_id = resp.slot_id();
-  p.page_size = resp.page_size();
-  p.pages.reserve(resp.pages_size());
-  for (const auto& pp : resp.pages()) p.pages.push_back({pp.buffer_index(), pp.page_index()});
-  p.descs.reserve(resp.descs_size());
-  for (const auto& d : resp.descs()) {
-    BufferMemoryDescBytes b;
-    b.buffer_index = d.buffer_index();
-    b.desc_bytes.assign(d.desc().begin(), d.desc().end());
-    p.descs.push_back(std::move(b));
-  }
-  return p;
-}
-
-PoolClient::SlotPlan FromResolveKeyResponse(const ::umbp::ResolveKeyResponse& resp) {
-  PoolClient::SlotPlan p;
   p.page_size = resp.page_size();
   p.pages.reserve(resp.pages_size());
   for (const auto& pp : resp.pages()) p.pages.push_back({pp.buffer_index(), pp.page_index()});
@@ -1040,6 +1026,7 @@ std::vector<bool> PoolClient::BatchGet(const std::vector<std::string>& keys,
   const double seconds =
       std::chrono::duration_cast<std::chrono::duration<double>>(call_end - call_start).count();
   if (seconds > 0.0) {
+    const auto metrics_t0 = std::chrono::steady_clock::now();
     auto split = ComputeBatchBandwidthBytes(results, sizes, routes, config_.master_config.node_id);
     ObserveBatchBandwidth(*master_client_, split.local, seconds,
                           MORI_UMBP_METRIC_CLIENT_BATCH_GET_BANDWIDTH,
@@ -1047,6 +1034,22 @@ std::vector<bool> PoolClient::BatchGet(const std::vector<std::string>& keys,
     ObserveBatchBandwidth(*master_client_, split.remote, seconds,
                           MORI_UMBP_METRIC_CLIENT_BATCH_GET_BANDWIDTH,
                           MORI_UMBP_METRIC_CLIENT_BATCH_GET_BANDWIDTH_HELP, "remote");
+    if (batchget_timing) {
+      const double ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+                            std::chrono::steady_clock::now() - metrics_t0)
+                            .count();
+      MORI_UMBP_INFO("[BatchGetTiming] stage=MetricsObserve keys={} elapsed_ms={:.3f}", keys.size(),
+                     ms);
+    }
+  }
+  if (batchget_timing) {
+    // Measured after ComputeBatchBandwidthBytes/ObserveBatchBandwidth (not off
+    // `seconds` above) so this reflects the actual E2E call duration, including
+    // bandwidth bookkeeping overhead, not just the work up to call_end.
+    const double total_ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+                                std::chrono::steady_clock::now() - call_start)
+                                .count();
+    MORI_UMBP_INFO("[BatchGetTiming] stage=Total keys={} elapsed_ms={:.3f}", keys.size(), total_ms);
   }
   return results;
 }
@@ -1464,7 +1467,7 @@ void PoolClient::ExecuteRemoteBatchGet(const std::vector<BatchGetItem>& items,
   };
 
   std::vector<RemoteGetEntry> entries;
-  if (!PrepareRemoteGetEntries(items, stub, &entries, results)) {
+  if (!PrepareRemoteGetEntries(items, peer, stub, &entries, results)) {
     return;
   }
   const double resolve_ms = batchget_timing ? mark_stage_ms() : 0.0;
@@ -1498,7 +1501,7 @@ void PoolClient::ExecuteRemoteBatchGet(const std::vector<BatchGetItem>& items,
 }
 
 bool PoolClient::PrepareRemoteGetEntries(const std::vector<BatchGetItem>& items,
-                                         ::umbp::UMBPPeer::Stub* stub,
+                                         PeerConnection& peer, ::umbp::UMBPPeer::Stub* stub,
                                          std::vector<RemoteGetEntry>* entries,
                                          std::vector<bool>* results) {
   entries->clear();
@@ -1514,15 +1517,27 @@ bool PoolClient::PrepareRemoteGetEntries(const std::vector<BatchGetItem>& items,
     return ms;
   };
 
+  // Ask the peer to omit the buffer descriptors once we have already hydrated
+  // them (from the GetPeerInfo handshake, or a prior resolve).  A wrong guess
+  // is safe: a missing descriptor is caught by the transfer-build guard and the
+  // entry degrades to a miss, never a corrupt read.
+  bool have_descs = false;
+  {
+    std::lock_guard<std::mutex> lock(peers_mutex_);
+    have_descs = !peer.dram_memories.empty();
+  }
+
   ::umbp::BatchResolveKeysRequest resolve_req;
   for (const auto& item : items) resolve_req.add_keys(*item.key);
+  resolve_req.set_omit_descs(have_descs);
   const double build_ms = batchget_timing ? mark_stage_ms() : 0.0;
 
   ::umbp::BatchResolveKeysResponse resolve_resp;
   grpc::ClientContext resolve_ctx;
   auto resolve_status = stub->BatchResolveKeys(&resolve_ctx, resolve_req, &resolve_resp);
   const double rpc_ms = batchget_timing ? mark_stage_ms() : 0.0;
-  if (!resolve_status.ok() || resolve_resp.entries_size() != static_cast<int>(items.size())) {
+  if (!resolve_status.ok() ||
+      BatchResolveKeyCount(resolve_resp) != static_cast<int>(items.size())) {
     MORI_UMBP_WARN("[PoolClient] BatchResolveKeys failed on {}: {}", items.front().route.node_id,
                    resolve_status.error_message());
     for (const auto& item : items) {
@@ -1537,22 +1552,36 @@ bool PoolClient::PrepareRemoteGetEntries(const std::vector<BatchGetItem>& items,
     return false;
   }
 
+  DecodedBatchResolve decoded = DecodeBatchResolveResponse(resolve_resp);
+  if (decoded.keys.size() != items.size()) {
+    // Malformed (mismatched parallel arrays); fail the whole batch rather than
+    // partially-read it.
+    MORI_UMBP_WARN("[PoolClient] BatchResolveKeys malformed response on {}: {} keys for {} items",
+                   items.front().route.node_id, decoded.keys.size(), items.size());
+    for (const auto& item : items) {
+      (*results)[item.index] = false;
+    }
+    return false;
+  }
+  // Hydrate the batch-level descriptors once (skipped when the peer honored
+  // omit_descs and sent none).
+  if (!decoded.descs.empty()) EnsureBufferDescsCached(peer, decoded.descs);
+
   entries->reserve(items.size());
   for (size_t i = 0; i < items.size(); ++i) {
     const auto& item = items[i];
-    const auto& resp_entry = resolve_resp.entries(static_cast<int>(i));
-    if (!resp_entry.found()) {
+    const auto& key = decoded.keys[i];
+    if (!key.found) {
       (*results)[item.index] = false;
       continue;
     }
-    if (resp_entry.size() != item.size) {
+    if (key.size != item.size) {
       MORI_UMBP_WARN("[PoolClient] BatchGet: size mismatch for key='{}' (wanted {}, got {})",
-                     *item.key, item.size, resp_entry.size());
+                     *item.key, item.size, key.size);
       (*results)[item.index] = false;
       continue;
     }
-    PoolClient::SlotPlan plan = FromResolveKeyResponse(resp_entry);
-    if (!SizeMatchesAllocation(item.size, plan.pages.size(), plan.page_size)) {
+    if (!SizeMatchesAllocation(item.size, key.pages.size(), decoded.page_size)) {
       MORI_UMBP_ERROR("[PoolClient] BatchGet: malformed slot for key='{}'", *item.key);
       (*results)[item.index] = false;
       continue;
@@ -1561,7 +1590,11 @@ bool PoolClient::PrepareRemoteGetEntries(const std::vector<BatchGetItem>& items,
     RemoteGetEntry entry;
     entry.result_index = item.index;
     entry.item = &item;
-    entry.plan = std::move(plan);
+    entry.plan.page_size = decoded.page_size;
+    entry.plan.pages = std::move(decoded.keys[i].pages);
+    // Descriptors were hydrated batch-level above; the per-entry plan carries
+    // none (BuildRemoteGetTransfers' EnsureBufferDescsCached call is a no-op on
+    // an empty list and the read path resolves descriptors by buffer_index).
     entries->push_back(std::move(entry));
   }
 
