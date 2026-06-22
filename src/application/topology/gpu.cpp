@@ -21,12 +21,37 @@
 // SOFTWARE.
 #include "mori/application/topology/gpu.hpp"
 
+#include <dlfcn.h>
+#include <unistd.h>
+
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #include "mori/application/utils/check.hpp"
 
 namespace mori {
 namespace application {
+
+// Instrumentation (rank 0 only): report which shared object each rsmi_* symbol
+// actually binds to at runtime. In a torch/ROCm 7.14 process libamd_smi.so
+// (amdsmi) is loaded into the global symbol scope and exports rsmi_init /
+// rsmi_is_P2P_accessible as default versioned symbols, so those calls get
+// interposed onto amdsmi while the rest still bind to librocm_smi64.
+static bool IsRank0() {
+  const char* r = getenv("LOCAL_RANK");
+  if (!r) r = getenv("RANK");
+  return (r == nullptr) || (strcmp(r, "0") == 0);
+}
+
+static void DumpRsmiSymbolOrigin(const char* name, void* fn) {
+  if (!IsRank0()) return;
+  Dl_info info;
+  if (dladdr(fn, &info) && info.dli_fname)
+    fprintf(stderr, "[RSMI-DLADDR pid=%d] %-28s -> %s\n", getpid(), name, info.dli_fname);
+  else
+    fprintf(stderr, "[RSMI-DLADDR pid=%d] %-28s -> (unknown)\n", getpid(), name);
+}
 
 /* ---------------------------------------------------------------------------------------------- */
 /*                                          TopoSystemGpu                                         */
@@ -44,6 +69,14 @@ PciBusId RsmiBusId2PciBusId(uint64_t rsmiBusId) {
 }
 
 void TopoSystemGpu::Load() {
+  DumpRsmiSymbolOrigin("rsmi_init", (void*)rsmi_init);
+  DumpRsmiSymbolOrigin("rsmi_num_monitor_devices", (void*)rsmi_num_monitor_devices);
+  DumpRsmiSymbolOrigin("rsmi_dev_pci_id_get", (void*)rsmi_dev_pci_id_get);
+  DumpRsmiSymbolOrigin("rsmi_is_P2P_accessible", (void*)rsmi_is_P2P_accessible);
+  DumpRsmiSymbolOrigin("rsmi_topo_get_link_type", (void*)rsmi_topo_get_link_type);
+  DumpRsmiSymbolOrigin("rsmi_topo_get_link_weight", (void*)rsmi_topo_get_link_weight);
+  DumpRsmiSymbolOrigin("rsmi_shut_down", (void*)rsmi_shut_down);
+
   uint32_t numGpus;
 
   ROCM_SMI_CHECK(rsmi_init(0));

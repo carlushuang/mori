@@ -9,6 +9,28 @@ if(WITH_MPI)
   endif()
 endif()
 find_package(hsa-runtime64 REQUIRED)
+
+# ROCm 7.14's hsakmt-config exports a link dependency on the imported target
+# "numa::numa", but ships no finder for it. Define it ourselves from the system
+# libnuma before find_package(hsakmt) so the imported target resolves.
+if(NOT TARGET numa::numa)
+  find_library(NUMA_LIBRARY NAMES numa)
+  find_path(NUMA_INCLUDE_DIR NAMES numa.h)
+  if(NOT NUMA_LIBRARY)
+    message(
+      FATAL_ERROR
+        "libnuma not found, but hsakmt requires the numa::numa target.\n"
+        "Install it (e.g. 'apt install libnuma-dev').")
+  endif()
+  add_library(numa::numa UNKNOWN IMPORTED)
+  set_target_properties(numa::numa PROPERTIES IMPORTED_LOCATION
+                                              "${NUMA_LIBRARY}")
+  if(NUMA_INCLUDE_DIR)
+    set_target_properties(numa::numa PROPERTIES INTERFACE_INCLUDE_DIRECTORIES
+                                                "${NUMA_INCLUDE_DIR}")
+  endif()
+endif()
+
 find_package(hsakmt REQUIRED)
 # find_library(IONIC_LIBRARY NAMES ionic HINTS /lib/x86_64-linux-gnu REQUIRED )
 
