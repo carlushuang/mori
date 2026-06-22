@@ -189,6 +189,46 @@ def shmem_module_init(hip_module: int):
     Returns:
         Status code (0 for success)
     """
+    # The module may have been loaded by a different libamdhip64 instance than
+    # the one libmori links against (e.g. the framework's ctypes-loaded HIP vs
+    # libmori's). In that case libmori's hipModuleGetGlobal cannot resolve this
+    # module handle, ShmemModuleInit fails with "named symbol not found", and
+    # globalGpuStates stays null -> null-pointer GPU fault. Worse, issuing the
+    # H2D copy from libmori's runtime can corrupt the launching context and make
+    # the next kernel launch fail with HIP 709.
+    #
+    # Fix: resolve the device symbol AND perform the H2D copy in the SAME runtime
+    # that owns the module (the framework's libamdhip64, reused by _get_hip_lib),
+    # asking C++ only for the *host* address/size of GpuStates (no device calls).
+    try:
+        from ctypes import byref, c_char_p, c_int, c_size_t, c_void_p
+
+        from mori.jit.hip_driver import _get_hip_lib
+
+        hip = _get_hip_lib()
+        dev_ptr = c_void_p()
+        sym_size = c_size_t()
+        err = hip.hipModuleGetGlobal(
+            byref(dev_ptr),
+            byref(sym_size),
+            c_void_p(hip_module),
+            c_char_p(b"_ZN4mori5shmem15globalGpuStatesE"),
+        )
+        if err == 0 and dev_ptr.value:
+            host_ptr = mori_cpp.gpu_states_host_ptr()
+            size = mori_cpp.gpu_states_size()
+            if sym_size.value:
+                size = min(size, sym_size.value)
+            hip.hipMemcpy.restype = c_int
+            hip.hipMemcpy.argtypes = [c_void_p, c_void_p, c_size_t, c_int]
+            # hipMemcpyHostToDevice == 1
+            cpy = hip.hipMemcpy(dev_ptr, c_void_p(host_ptr), c_size_t(size), 1)
+            if cpy == 0:
+                return 0
+    except Exception:
+        # Fall back to the libmori-side initialization below.
+        pass
+
     return mori_cpp.shmem_module_init(hip_module)
 
 

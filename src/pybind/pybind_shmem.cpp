@@ -40,6 +40,12 @@ int64_t LoadShmemModule(const std::string& hsaco_path) {
   return mori::shmem::LoadShmemModule(hsaco_path.c_str());
 }
 
+// Returns the host address (as int) of the singleton GpuStates so Python can do
+// the H2D copy in the same HIP runtime that owns the JIT module. No HIP calls.
+uint64_t GpuStatesHostPtr() { return static_cast<uint64_t>(mori::shmem::GpuStatesHostPtr()); }
+
+uint64_t GpuStatesSizeBytes() { return static_cast<uint64_t>(mori::shmem::GpuStatesSizeBytes()); }
+
 int64_t ShmemMyPe() { return mori::shmem::ShmemMyPe(); }
 
 int64_t ShmemNPes() { return mori::shmem::ShmemNPes(); }
@@ -134,6 +140,9 @@ void RegisterMoriShmem(py::module_& m) {
   m.def("load_shmem_module", &LoadShmemModule, py::arg("hsaco_path"),
         py::call_guard<py::gil_scoped_release>(),
         "Load JIT-compiled shmem module (.hsaco) with globalGpuStates and barrier kernel");
+  m.def("gpu_states_host_ptr", &GpuStatesHostPtr,
+        "Host address (int) of the singleton GpuStates (for caller-side H2D copy)");
+  m.def("gpu_states_size", &GpuStatesSizeBytes, "Size in bytes of GpuStates");
 
   // Query APIs
   m.def("shmem_mype", &ShmemMyPe, "Get my PE (process element) ID");

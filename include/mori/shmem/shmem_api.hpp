@@ -85,6 +85,11 @@ int ShmemModuleInit(void* hipModule);
 int LoadShmemModule(const char* hsaco_path);
 int CopyGpuStatesToSymbol(void* deviceSymbolAddr);
 
+// Host-only accessors for performing the GpuStates H2D copy in the caller's HIP
+// runtime (see runtime.cpp for rationale). These do not issue any HIP calls.
+uintptr_t GpuStatesHostPtr();
+size_t GpuStatesSizeBytes();
+
 using GpuStatesAddrProvider = void* (*)();
 void RegisterGpuStatesAddrProvider(GpuStatesAddrProvider provider);
 

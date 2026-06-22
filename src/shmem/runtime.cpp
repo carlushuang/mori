@@ -165,6 +165,21 @@ int CopyGpuStatesToSymbol(void* deviceSymbolAddr) {
   return 0;
 }
 
+// Host-only accessors: expose the address/size of the host-side GpuStates so the
+// caller can perform the H2D copy in *its own* HIP runtime. This matters when the
+// JIT module is loaded by a different libamdhip64 instance than the one libmori
+// links against: resolving the device symbol and memcpy'ing must happen in the
+// runtime that owns the module, otherwise the symbol cannot be resolved (null
+// globalGpuStates -> GPU page fault) or a cross-runtime device call corrupts the
+// launching context (HIP 709 on the next kernel launch). These functions perform
+// no HIP calls.
+uintptr_t GpuStatesHostPtr() {
+  ShmemStates* states = ShmemStatesSingleton::GetInstance();
+  return reinterpret_cast<uintptr_t>(&states->gpuStates);
+}
+
+size_t GpuStatesSizeBytes() { return sizeof(GpuStates); }
+
 /* ---------------------------------------------------------------------------------------------- */
 /*                                      Query APIs                                               */
 /* ---------------------------------------------------------------------------------------------- */
