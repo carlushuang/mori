@@ -156,6 +156,26 @@
 <li class="toctree-l2"><a class="reference internal" href="MORI-SHMEM-GUIDE.html#source-files">Source Files</a></li>
 </ul>
 </li>
+<li class="toctree-l1"><a class="reference internal" href="MORI-CCO-GUIDE.html">MORI CCO Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="MORI-CCO-GUIDE.html#table-of-contents">Table of Contents</a></li>
+<li class="toctree-l2"><a class="reference internal" href="MORI-CCO-GUIDE.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="MORI-CCO-GUIDE.html#concepts">1. Concepts</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="MORI-CCO-GUIDE.html#communicator-ccocomm">Communicator (<code class="docutils literal notranslate"><span class="pre">ccoComm</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="MORI-CCO-GUIDE.html#symmetric-memory-and-windows">Symmetric memory and windows</a></li>
+<li class="toctree-l3"><a class="reference internal" href="MORI-CCO-GUIDE.html#device-communicator-ccodevcomm">Device communicator (<code class="docutils literal notranslate"><span class="pre">ccoDevComm</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="MORI-CCO-GUIDE.html#teams">Teams</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="MORI-CCO-GUIDE.html#initialization">2. Initialization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="MORI-CCO-GUIDE.html#memory-and-windows">3. Memory and Windows</a></li>
+<li class="toctree-l2"><a class="reference internal" href="MORI-CCO-GUIDE.html#device-communicator">4. Device Communicator</a></li>
+<li class="toctree-l2"><a class="reference internal" href="MORI-CCO-GUIDE.html#host-barrier">5. Host Barrier</a></li>
+<li class="toctree-l2"><a class="reference internal" href="MORI-CCO-GUIDE.html#device-side-programming">6. Device-Side Programming</a></li>
+<li class="toctree-l2"><a class="reference internal" href="MORI-CCO-GUIDE.html#examples">7. Examples</a></li>
+<li class="toctree-l2"><a class="reference internal" href="MORI-CCO-GUIDE.html#c-api">8. C++ API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="MORI-CCO-GUIDE.html#environment-variables">9. Environment Variables</a></li>
+</ul>
+</li>
 <li class="toctree-l1"><a class="reference internal" href="MORI-IR-GUIDE.html">MORI-IR Guide</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="MORI-IR-GUIDE.html#table-of-contents">Table of Contents</a></li>
 <li class="toctree-l2"><a class="reference internal" href="MORI-IR-GUIDE.html#architecture">Architecture</a></li>
@@ -245,7 +265,10 @@
 </li>
 <li class="toctree-l1 current"><a class="current reference internal" href="#">MORI-IO Benchmark</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="#table-of-contents">Table of Contents</a></li>
-<li class="toctree-l2"><a class="reference internal" href="#benchmark-commands">Benchmark Commands</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#benchmark-commands">Benchmark Commands</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#fabric-cross-node-scale-up-ualink-super-node">Fabric (cross-node scale-up UALink super-node)</a></li>
+</ul>
+</li>
 <li class="toctree-l2"><a class="reference internal" href="#benchmark-arguments">Benchmark Arguments</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#results-thor2-rdma-read">Results: Thor2 RDMA Read</a></li>
 <li class="toctree-l2"><a class="reference internal" href="#results-thor2-rdma-write">Results: Thor2 RDMA Write</a><ul>
@@ -352,6 +375,29 @@ torchrun<span class="w"> </span>--nnodes<span class="o">=</span><span class="m">
 <span class="w">    </span>tests/python/io/benchmark.py<span class="w"> </span>--host<span class="o">=</span><span class="s2">&quot;10.194.129.65&quot;</span>
 </pre></div>
 </div>
+<section id="fabric-cross-node-scale-up-ualink-super-node">
+<h3>Fabric (cross-node scale-up UALink super-node)<a class="headerlink" href="#fabric-cross-node-scale-up-ualink-super-node" title="Link to this heading"></a></h3>
+<p>The <code class="docutils literal notranslate"><span class="pre">fabric</span></code> backend transfers between two nodes that share the same scale-up
+fabric domain (<strong>same vPOD</strong> — verify with <code class="docutils literal notranslate"><span class="pre">amd-smi</span> <span class="pre">fabric</span></code> that <code class="docutils literal notranslate"><span class="pre">PPOD_ID</span></code> and
+<code class="docutils literal notranslate"><span class="pre">VPOD_ID</span></code> match and <code class="docutils literal notranslate"><span class="pre">ACCEL_STATE</span></code> is <code class="docutils literal notranslate"><span class="pre">READY</span></code> on both). Buffers are allocated as
+fabric-exportable VMM memory internally, so no <code class="docutils literal notranslate"><span class="pre">--host</span></code>/QP options are needed;
+OOB metadata is still exchanged over gloo (torchrun).</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="c1"># node A (initiator)</span>
+torchrun<span class="w"> </span>--nnodes<span class="o">=</span><span class="m">2</span><span class="w"> </span>--node_rank<span class="o">=</span><span class="m">0</span><span class="w"> </span>--nproc_per_node<span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--master_addr<span class="o">=</span><span class="s2">&quot;&lt;nodeA_ip&gt;&quot;</span><span class="w"> </span>--master_port<span class="o">=</span><span class="m">1234</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>tests/python/io/benchmark.py<span class="w"> </span>--backend<span class="w"> </span>fabric<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--all<span class="w"> </span>--enable-sess<span class="w"> </span>--enable-batch-transfer<span class="w"> </span>--transfer-batch-size<span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--sweep-start-size<span class="w"> </span><span class="m">1048576</span><span class="w"> </span>--sweep-max-size<span class="w"> </span><span class="m">268435456</span><span class="w"> </span>--op-type<span class="w"> </span><span class="nb">read</span>
+
+<span class="c1"># node B (target): same command with --node_rank=1</span>
+</pre></div>
+</div>
+<blockquote>
+<div><p>Requires ROCm ≥ 7.15 (HIP fabric VMM APIs). Only GPU memory is supported
+(<code class="docutils literal notranslate"><span class="pre">--mem-type</span> <span class="pre">gpu</span></code>). If the two nodes are not in the same vPOD, session creation
+fails fast with a clear error.</p>
+</div></blockquote>
+</section>
 </section>
 <section id="benchmark-arguments">
 <h2>Benchmark Arguments<a class="headerlink" href="#benchmark-arguments" title="Link to this heading"></a></h2>
@@ -362,6 +408,12 @@ torchrun<span class="w"> </span>--nnodes<span class="o">=</span><span class="m">
 </tr>
 </thead>
 <tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--backend</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">rdma</span></code> (cross-node), <code class="docutils literal notranslate"><span class="pre">xgmi</span></code> (intra-node), or <code class="docutils literal notranslate"><span class="pre">fabric</span></code> (cross-node UALink super-node, same vPOD)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--num-streams</span></code> / <code class="docutils literal notranslate"><span class="pre">--num-events</span></code></p></td>
+<td><p>HIP stream/event pool size for <code class="docutils literal notranslate"><span class="pre">xgmi</span></code>/<code class="docutils literal notranslate"><span class="pre">fabric</span></code> backends (default <code class="docutils literal notranslate"><span class="pre">64</span></code>)</p></td>
+</tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">--buffer-size</span></code></p></td>
 <td><p>Message size per transfer (bytes)</p></td>
 </tr>
