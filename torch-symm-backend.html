@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A torch SymmetricMemory backend for mori</title>
+<meta name="description" content="Why mori registers itself as a torch SymmetricMemory backend, how it is designed, and how one implementation covers gfx942, gfx950 and gfx1250.">
+<style>
+:root {
+  --bg: #ffffff;
+  --fg: #1b1f24;
+  --muted: #5b6672;
+  --line: #d8dee4;
+  --soft: #f6f8fa;
+  --accent: #b3122b;
+  --accent-soft: #fdf0f2;
+  --ok: #1a7f37;
+  --warn: #9a6700;
+  --code-bg: #f6f8fa;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --muted: #9198a1;
+    --line: #2b313a;
+    --soft: #161b22;
+    --accent: #ff7b8a;
+    --accent-soft: #21161a;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --code-bg: #161b22;
+  }
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 900px; margin: 0 auto; padding: 0 20px 96px; }
+header.hero { border-bottom: 1px solid var(--line); background: var(--soft); padding: 48px 0 34px; margin-bottom: 40px; }
+header.hero .wrap { padding-bottom: 0; }
+h1 { font-size: 34px; line-height: 1.2; margin: 0 0 10px; letter-spacing: -0.02em; }
+.sub { color: var(--muted); font-size: 18px; margin: 0 0 20px; max-width: 62ch; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  font: 500 12px/1 var(--mono);
+  padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--bg); color: var(--muted); text-decoration: none;
+}
+.chip a, a.chip:hover { color: var(--accent); }
+.chip.hot { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+h2 {
+  font-size: 24px; margin: 52px 0 14px; letter-spacing: -0.01em;
+  padding-top: 10px; border-top: 1px solid var(--line);
+}
+h2 .num { color: var(--accent); font: 600 14px/1 var(--mono); display: block; margin-bottom: 6px; }
+h3 { font-size: 17px; margin: 30px 0 8px; }
+p { margin: 0 0 14px; }
+ul, ol { margin: 0 0 14px; padding-left: 22px; }
+li { margin-bottom: 6px; }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+code { font: 13px/1.5 var(--mono); background: var(--code-bg); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
+pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; overflow-x: auto; margin: 0 0 16px; }
+pre code { background: none; border: 0; padding: 0; font-size: 12.5px; line-height: 1.55; }
+.callout { border: 1px solid var(--line); border-left: 3px solid var(--accent); background: var(--soft); border-radius: 0 8px 8px 0; padding: 14px 18px; margin: 0 0 20px; }
+.callout p:last-child { margin-bottom: 0; }
+.callout .label { font: 600 11px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--accent); display: block; margin-bottom: 8px; }
+table { border-collapse: collapse; width: 100%; margin: 0 0 18px; font-size: 14.5px; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--line); padding: 8px 11px; text-align: left; vertical-align: top; }
+th { background: var(--soft); font-weight: 600; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.ok { color: var(--ok); font-weight: 600; }
+.warn { color: var(--warn); font-weight: 600; }
+figure { margin: 24px 0; }
+figure svg { width: 100%; height: auto; display: block; }
+figcaption { color: var(--muted); font-size: 13.5px; margin-top: 8px; }
+.svgbox { border: 1px solid var(--line); border-radius: 8px; background: var(--soft); padding: 18px; }
+svg text { font-family: var(--mono); font-size: 11px; fill: var(--fg); }
+svg text.t { font-size: 12px; font-weight: 600; }
+svg text.s { fill: var(--muted); font-size: 10px; }
+svg rect.box { fill: var(--bg); stroke: var(--line); stroke-width: 1.2; }
+svg rect.hl { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.4; }
+svg line, svg path.ln { stroke: var(--muted); stroke-width: 1.2; fill: none; }
+svg path.acc { stroke: var(--accent); stroke-width: 1.4; fill: none; }
+.toc { background: var(--soft); border: 1px solid var(--line); border-radius: 8px; padding: 16px 20px; }
+.toc ol { margin: 0; padding-left: 20px; }
+.toc li { margin-bottom: 3px; }
+footer { border-top: 1px solid var(--line); margin-top: 60px; padding-top: 20px; color: var(--muted); font-size: 14px; }
+.small { font-size: 13.5px; color: var(--muted); }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 700px) { .grid2 { grid-template-columns: 1fr; } h1 { font-size: 27px; } }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; background: var(--bg); }
+.card h4 { margin: 0 0 6px; font-size: 14px; }
+.card p { margin: 0; font-size: 14px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <h1>A torch SymmetricMemory backend for mori</h1>
+    <p class="sub">Making <code>symm_mem.empty()</code> / <code>symm_mem.rendezvous()</code> work on AMD GPUs through mori, on plain HIP VMM — one implementation that covers fd-based and fabric-based handle exchange, gfx942 through gfx1250.</p>
+    <div class="chips">
+      <a class="chip hot" href="https://github.com/ROCm/mori/pull/544">ROCm/mori#544</a>
+      <a class="chip" href="https://github.com/ROCm/mori/issues/557">RFC #557 &middot; stage plan</a>
+      <span class="chip">stage 1 of 3</span>
+      <span class="chip">gfx942 &middot; gfx950 &middot; gfx1250</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+<div class="callout">
+  <span class="label">In one paragraph</span>
+  <p>PyTorch has a device-side one-sided memory abstraction — <b>SymmetricMemory</b> — that a growing set of collectives, Triton kernels and inductor passes are written against. Its ROCm story is thin: torch's built-in CUDA implementation compiles its fabric path out entirely on ROCm and hardcodes POSIX file-descriptor sharing. This PR registers <b>mori</b> as a torch SymmetricMemory backend so that torch's own entry points allocate and rendezvous through mori, with a per-device capability probe that picks fabric handles where the hardware and driver have them and file descriptors where they do not. It is deliberately scoped to torch's pointer-array model (stage 1); the flat-window and scale-out layers arrive as mori's cco window in stages 2 and 3.</p>
+</div>
+
+<div class="toc">
+  <ol>
+    <li><a href="#why">Why do this at all</a></li>
+    <li><a href="#matters">Why it matters</a></li>
+    <li><a href="#design">How it is designed</a></li>
+    <li><a href="#unify">One backend, three architectures</a></li>
+    <li><a href="#measured">What it measures</a></li>
+    <li><a href="#roadmap">Roadmap and known gaps</a></li>
+  </ol>
+</div>
+
+<h2 id="why"><span class="num">01</span>Why do this at all</h2>
+
+<h3>What torch's SymmetricMemory gives you</h3>
+<p>A symmetric memory window is a buffer that every rank in a process group allocates, and that every rank can read and write <em>directly</em> — a peer's slot is a plain pointer that a kernel dereferences, not a message you enqueue on a communicator. The programming model is one-sided: no matching send for a receive, no collective call in the fast path, just loads and stores plus your own synchronisation.</p>
+<p>torch exposes it as three calls, and that is the whole surface an application sees:</p>
+<pre><code>import torch.distributed._symmetric_memory as symm_mem
+import mori.allocator                     # importing registers the "MORI" backend
+
+symm_mem.set_backend("MORI")
+t    = symm_mem.empty(1024, dtype=torch.bfloat16, device=device)
+hdl  = symm_mem.rendezvous(t, group_name)
+
+peer = hdl.get_buffer(1, (1024,), torch.bfloat16)   # rank 1's slot, as a tensor
+ptrs = hdl.buffer_ptrs_dev                          # or the device pointer array, for a kernel</code></pre>
+<p>That model is what fused, low-latency communication is being written against today: one-shot and two-shot all-reduce, MoE all-to-all and combine, KV-cache movement for disaggregated serving, and increasingly Triton kernels that take <code>buffer_ptrs_dev</code> and do the transfer inline with compute instead of around it.</p>
+
+<h3>The gap on ROCm</h3>
+<p>torch ships a CUDA backend for this. Reading it on <code>main</code>, the ROCm arm is a second-class path:</p>
+<ul>
+  <li><code>c10/cuda/PeerToPeerAccess.cpp:164</code> — <code>get_fabric_access()</code> is wrapped in <code>#if !defined(USE_ROCM) &amp;&amp; CUDA_VERSION &gt;= 12040 &amp;&amp; ...</code>; the <code>#else</code> is <code>return false</code>. On ROCm the capability query is a compile-time constant.</li>
+  <li><code>torch/csrc/distributed/c10d/symm_mem/CUDASymmetricMemory.cu:342</code> — the allocator asks <code>at::cuda::get_fabric_access()</code> and chooses <code>FABRIC_HANDLE</code> or <code>POSIX_FD</code>. That block is <code>#if !defined(USE_ROCM)</code>. The <code>#elif defined(USE_ROCM)</code> arm at line 369 <b>hardcodes</b> <code>handle_type_ = POSIX_FD</code> and <code>prop.requestedHandleType = hipMemHandleTypePosixFileDescriptor</code>.</li>
+  <li>Nothing in torch ever asks HIP for a fabric handle, even on parts that have them.</li>
+</ul>
+<p>So on a gfx1250 box where the driver exports fabric handles happily, torch would still exchange file descriptors over a UNIX socket. Worse, the pieces you would need to do better are not reusable: torch's <code>IpcChannel</code>, the SCM_RIGHTS helper for the fd path, is declared at <code>CUDASymmetricMemoryUtils.hpp:97</code> with no <code>TORCH_API</code> — it is not exported from any libtorch <code>.so</code>.</p>
+<p>An AMD-side backend is therefore not a duplicate of torch's: it is the only place a per-device probe, fabric handles, and eventually mori's own window and scale-out transports can live.</p>
+
+<h3>Why not mori's existing allocators</h3>
+<p>mori already has two symmetric allocators — the shmem heap and cco. Neither can back torch <em>as-is</em>, for one specific reason:</p>
+<div class="callout">
+  <span class="label">The invariant torch cannot hold</span>
+  <p>A symmetric heap keeps peer offsets aligned only while every rank allocates <b>and frees</b> in the same order. torch tensors are freed by Python's garbage collector, and GC order is not synchronised across ranks. One rank dropping a tensor early is enough to skew the heap.</p>
+</div>
+<p>This backend sidesteps the invariant instead of fighting it: every allocation is an <em>independent</em> HIP VMM allocation with its own rendezvous, and <code>free()</code> is purely local, so divergent free order is harmless. The extension links neither <code>mori_shmem</code> nor <code>mori_application</code>, and needs no mori bootstrap — torch's own process group is the only rendezvous channel.</p>
+<p>That is an argument against the <em>heap</em>, not against cco. cco's <code>ccoMemImport</code> and <code>ccoWindowRegister</code> already alias an externally-owned HIP VMM allocation into cco's flat slot — the header's own example is "e.g. a torch.symm_mem buffer" — which is exactly the shape of the handoff for stage 2.</p>
+
+<h2 id="matters"><span class="num">02</span>Why it matters</h2>
+
+<div class="grid2">
+  <div class="card">
+    <h4>It is the ecosystem's integration point</h4>
+    <p>NVSHMEM, NCCL's device API and torch's own collectives all converge on the same abstraction. A backend here is how mori gets reached by code nobody wrote for mori.</p>
+  </div>
+  <div class="card">
+    <h4>Zero application change</h4>
+    <p>An application selects a string. The kernel author sees the same <code>buffer_ptrs_dev</code> contract they would get from the CUDA backend, so kernels port unmodified.</p>
+  </div>
+  <div class="card">
+    <h4>Fabric where fabric exists</h4>
+    <p>The probe is per device at run time, not per architecture at compile time — so newer parts get the better handle path without a torch change and without a rebuild.</p>
+  </div>
+  <div class="card">
+    <h4>A staged path, not a fork</h4>
+    <p>Stage 1 ships something small and testable that gives up nothing measurable; the flat window and scale-out land later as cco, rather than as a parallel scheme invented in the allocator.</p>
+  </div>
+</div>
+
+<p style="margin-top:18px">Concretely, once <code>set_backend("MORI")</code> works: torch's symmetric-memory collectives, MemPool-allocated symmetric tensors, and any Triton kernel written against the pointer array all run on AMD hardware through mori's allocation path — and mori gains a place to put fabric handles, its window layout, and later its RDMA and SDMA transports where torch code will actually reach them.</p>
+
+<h2 id="design"><span class="num">03</span>How it is designed</h2>
+
+<h3>Where the code sits</h3>
+<figure>
+<div class="svgbox">
+<svg viewBox="0 0 860 300" role="img" aria-label="Layering diagram from application down to HIP VMM">
+  <rect class="box" x="10" y="10" width="840" height="46" rx="6"/>
+  <text class="t" x="26" y="32">Application / Triton kernel / torch symm_mem collectives</text>
+  <text class="s" x="26" y="47">symm_mem.empty &#183; symm_mem.rendezvous &#183; hdl.buffer_ptrs_dev &#183; torch.ops.symm_mem.*</text>
+
+  <path class="ln" d="M430 56 L430 76" marker-end="url(#a)"/>
+  <rect class="box" x="10" y="76" width="840" height="46" rx="6"/>
+  <text class="t" x="26" y="98">torch  c10d::symmetric_memory  (SymmetricMemory / SymmetricMemoryAllocator)</text>
+  <text class="s" x="26" y="113">register_availability("MORI", ...) makes the backend selectable; set_backend picks it</text>
+
+  <path class="acc" d="M430 122 L430 142" marker-end="url(#b)"/>
+  <rect class="hl" x="10" y="142" width="840" height="76" rx="6"/>
+  <text class="t" x="26" y="164">mori_torch_symm  &#8212;  src/allocator/symm_backend.cpp   (this PR)</text>
+  <text x="26" y="184">MoriSymmAllocator: alloc / free / rendezvous / get_alloc_size</text>
+  <text x="26" y="200">MoriSymmetricMemory: buffer_ptrs, buffer_ptrs_dev, rank map, signal pad (opt)</text>
+  <text class="s" x="26" y="214">ProbeHandleType(dev) &#183; StoreExchange (fabric) &#183; FdChannel/SCM_RIGHTS (posix_fd)</text>
+
+  <path class="ln" d="M240 218 L240 240" marker-end="url(#a)"/>
+  <path class="ln" d="M620 218 L620 240" marker-end="url(#a)"/>
+  <rect class="box" x="10" y="240" width="420" height="48" rx="6"/>
+  <text class="t" x="26" y="262">HIP VMM</text>
+  <text class="s" x="26" y="278">hipMemCreate &#183; AddressReserve &#183; Map &#183; SetAccess &#183; Export/Import</text>
+  <rect class="box" x="440" y="240" width="410" height="48" rx="6"/>
+  <text class="t" x="456" y="262">torch Store (from the process group)</text>
+  <text class="s" x="456" y="278">all_gather of the rendezvous request: sizes, pid, fabric blob</text>
+
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="currentColor" opacity=".55"/>
+    </marker>
+    <marker id="b" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="currentColor" opacity=".9"/>
+    </marker>
+  </defs>
+</svg>
+</div>
+<figcaption>The backend is a single translation unit built as a torch <code>CppExtension</code>. It binds no torch types beyond the two interfaces it implements; its pybind surface is <code>register_backend</code> / <code>shutdown</code> / <code>handle_type</code> / <code>backend_name</code> / <code>signal_pad_supported</code>.</figcaption>
+</figure>
+
+<h3>Allocation</h3>
+<p><code>alloc(size, device, group)</code> is deliberately dumb and entirely local — nothing collective happens here, because torch may allocate at any time on any rank:</p>
+<ol>
+  <li>Probe the device's shareable handle type (cached, once per device).</li>
+  <li><code>hipMemGetAllocationGranularity</code>, round <code>size + signal_pad</code> up to it.</li>
+  <li><code>hipMemCreate</code> &rarr; <code>hipMemAddressReserve</code> &rarr; <code>hipMemMap</code> &rarr; <code>hipMemSetAccess(read-write, self)</code> &rarr; <code>hipMemset(0)</code>.</li>
+  <li>Record the block in a pointer-keyed table and hand the VA back to torch.</li>
+</ol>
+<p>Memory is <b>coarse-grained pinned</b> (<code>hipMemAllocationTypePinned</code>). This was measured, not assumed: fine-grained/uncached windows — which is what cco windows are — halved bandwidth on gfx1250 (712 vs 1499 GB/s at 4 ranks) and changed nothing on gfx950.</p>
+
+<h3>Rendezvous</h3>
+<p>This is where the window is built. Every rank publishes one <code>RendezvousReq</code> through the torch Store — allocation size, buffer size, device index, pid, and (fabric path only) the 64-byte handle blob — then validates that all ranks allocated the same size, reserves one flat VA span of <code>world_size &times; stride</code>, and maps every rank's physical memory into its own slot.</p>
+
+<figure>
+<div class="svgbox">
+<svg viewBox="0 0 860 250" role="img" aria-label="Rendezvous: flat span with one slot per rank, plus the published pointer array">
+  <text class="t" x="10" y="20">One VA span reserved per rendezvous, on every rank (here: rank 2 of 4)</text>
+
+  <rect class="box" x="10" y="34" width="200" height="52" rx="4"/>
+  <text x="24" y="56">slot 0</text><text class="s" x="24" y="72">imported from rank 0</text>
+  <rect class="box" x="220" y="34" width="200" height="52" rx="4"/>
+  <text x="234" y="56">slot 1</text><text class="s" x="234" y="72">imported from rank 1</text>
+  <rect class="hl" x="430" y="34" width="200" height="52" rx="4"/>
+  <text x="444" y="56">slot 2 &#8212; ours</text><text class="s" x="444" y="72">second alias, retained handle</text>
+  <rect class="box" x="640" y="34" width="200" height="52" rx="4"/>
+  <text x="654" y="56">slot 3</text><text class="s" x="654" y="72">imported from rank 3</text>
+
+  <path class="ln" d="M10 98 L210 98"/><path class="ln" d="M10 94 L10 102"/><path class="ln" d="M210 94 L210 102"/>
+  <text class="s" x="72" y="114">stride = alloc_size</text>
+  <path class="ln" d="M10 130 L840 130"/><path class="ln" d="M10 126 L10 134"/><path class="ln" d="M840 126 L840 134"/>
+  <text class="s" x="370" y="146">span = world_size &#215; stride</text>
+
+  <rect class="box" x="10" y="164" width="830" height="72" rx="6"/>
+  <text class="t" x="26" y="186">What torch is told: buffer_ptrs / buffer_ptrs_dev</text>
+  <text x="26" y="206">[ base+0&#183;stride , base+1&#183;stride , base+2&#183;stride , base+3&#183;stride ]</text>
+  <text class="s" x="26" y="224">Evenly strided as an implementation detail; the API is the array. The flat form is stage 2 (cco's ccoWindowDevice).</text>
+</svg>
+</div>
+<figcaption>The local rank's own memory is mapped a <em>second</em> time, via <code>hipMemRetainAllocationHandle</code>, so the stride is uniform for every slot including our own. That uniformity is what makes the pointer array evenly spaced.</figcaption>
+</figure>
+
+<h3>Handle exchange: two paths, one code path around them</h3>
+<table>
+  <thead><tr><th>&nbsp;</th><th>Fabric</th><th>POSIX file descriptor</th></tr></thead>
+  <tbody>
+    <tr><td>Handle is</td><td>64 opaque bytes</td><td>an integer index into <em>one process's</em> fd table</td></tr>
+    <tr><td>Travels over</td><td>the torch Store, inline in the rendezvous all-gather</td><td>a UNIX datagram socket with <code>SCM_RIGHTS</code></td></tr>
+    <tr><td>Extra machinery</td><td>none</td><td><code>FdChannel</code> — bind <code>/tmp/mori_symm_&lt;pid&gt;_&lt;rank&gt;</code>, send to every peer, receive <code>world_size-1</code></td></tr>
+    <tr><td>Ordering</td><td>all-gather is ordered</td><td>datagrams arrive in any order, so each carries its sender's rank as the payload</td></tr>
+  </tbody>
+</table>
+<p>The fd path exists only because torch's own <code>IpcChannel</code> is not exported. It is ~110 lines and self-contained; if libtorch ever exports the real one, it deletes cleanly.</p>
+
+<h3>Deliberate omissions</h3>
+<ul>
+  <li><b>No signal pad by default.</b> <code>barrier()</code>, <code>put_signal()</code> and <code>wait_signal()</code> are unimplemented and raise, so reserving torch's 9216-byte pad would waste a whole 2 MiB physical page per window (backing is 2 MiB-paged) for something nothing can use. <code>MORI_SYMM_SIGNAL_PAD=ON</code> reserves it, and <code>mori.allocator.signal_pad_supported()</code> reports which build you have — torch's <em>own</em> collectives synchronise through that pad, so they need the flag.</li>
+  <li><b>No multicast.</b> HIP exposes no multicast API, so <code>has_multicast_support()</code> is false and <code>multimem_*</code> is out.</li>
+  <li><b>No flat-window API.</b> The pointers are strided, and exposing <code>base + rank*stride</code> would be a third definition of a layout cco already owns. Stage 2 instead.</li>
+  <li><b>Teardown off by default.</b> See <a href="#roadmap">gaps</a>.</li>
+</ul>
+
+<h3>Lifetime</h3>
+<p>Two details that are easy to get wrong. The allocator singleton is intentionally immortal, because <code>register_availability()</code> parks a reference in a libtorch-owned registry that outlives the extension's statics. And release is driven from an <code>atexit</code> hook registered on import, not from destructors: by the time static destructors run, HIP is already unwinding and every VMM call segfaults, while <code>is_finalizing()</code> still reports false.</p>
+
+<h2 id="unify"><span class="num">04</span>One backend, three architectures</h2>
+
+<p>The interesting design question is not "how do I support gfx1250" — it is how a single build behaves correctly on parts whose capabilities differ, against a HIP whose spelling of those capabilities is still moving. Three mechanisms do the work.</p>
+
+<h3>1. Capability by probe, not by architecture</h3>
+<p>There is no <code>if (gfx1250)</code> anywhere in the backend, and no reliance on a device attribute enum — those are not stable across HIP releases. Instead each device is probed once, at first allocation, by actually doing the thing:</p>
+<pre><code>hipMemAllocationHandleType ProbeHandleType(int dev) {          // cached per device
+  chosen = hipMemHandleTypePosixFileDescriptor;
+  prop   = MakeProp(dev, hipMemHandleTypeFabricCompat);
+  if (hipMemGetAllocationGranularity(&amp;gran, &amp;prop, ...) == hipSuccess &amp;&amp; gran &gt; 0) {
+    if (hipMemCreate(&amp;h, gran, &amp;prop, 0) == hipSuccess) {       // fails outright on gfx9
+      if (hipMemExportToShareableHandle(&amp;blob, h, hipMemHandleTypeFabricCompat, 0) == hipSuccess)
+        chosen = hipMemHandleTypeFabricCompat;                  // create AND export must work
+      hipMemRelease(h);
+    }
+  }
+  hipGetLastError();          // the probe is expected to fail on gfx9; clear the sticky error
+  return chosen;
+}</code></pre>
+<p>One granularity-sized allocation, exported and released. Both steps have to succeed, because they fail in different places on different parts: on gfx9 <code>hipMemCreate</code> itself reports "operation not supported", whereas on gfx1250 with an older ROCm, create succeeded and only the <em>export</em> failed. Checking either one alone would have picked wrong on one of the two.</p>
+
+<h3>2. A compat shim for a moving API</h3>
+<p>Fabric handles are not spelled the same way in every ROCm release. <code>include/mori/utils/hip_compat.hpp</code> pins one name, mirroring the shim RCCL uses:</p>
+<pre><code>#ifdef HIP_FABRIC_API
+typedef hipMemFabricHandle_t hipMemFabricHandle_compat_t;
+#define MORI_MEM_HANDLE_TYPE_FABRIC hipMemHandleTypeFabric
+#else
+typedef struct { unsigned char data[64]; } hipMemFabricHandle_compat_t;
+#define MORI_MEM_HANDLE_TYPE_FABRIC ((hipMemAllocationHandleType)0x8)
+#endif</code></pre>
+<p>The same header also absorbs an unrelated ROCm break: <code>hipMemImportFromShareableHandle</code> takes the fd <em>as</em> a pointer-sized value from ROCm 7.1, and a pointer <em>to</em> the fd before that. Both quirks are one-line differences that would otherwise be sprinkled through the allocator.</p>
+
+<h3>3. A layout the kernel cannot tell apart</h3>
+<p>Whatever the handle type, rendezvous ends in the same place: one flat VA span, uniform stride, every slot mapped read-write, published as a pointer array. A kernel written against <code>buffer_ptrs_dev</code> sees identical geometry on a fabric part and an fd part. The all-to-all example demonstrates it — the same HIP source and the same Triton source run unmodified on wave64 gfx950 and wave32 gfx1250, with no arch guards and no tuning difference beyond the grid heuristic reading the CU count.</p>
+
+<table>
+  <thead>
+    <tr><th>Architecture</th><th>Handle type chosen</th><th>Why</th><th>Status</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>gfx1250 (ROCm 7.14 / 7.15)</td>
+      <td><b>fabric</b></td>
+      <td>create + export both succeed; handle rides the Store</td>
+      <td class="ok">2 and 4 ranks OK</td>
+    </tr>
+    <tr>
+      <td>gfx950 (MI355X)</td>
+      <td>posix_fd</td>
+      <td><code>hipMemCreate</code> with a fabric handle type is unsupported</td>
+      <td class="ok">2, 4, 8 ranks OK</td>
+    </tr>
+    <tr>
+      <td>gfx942 (MI308X)</td>
+      <td>posix_fd</td>
+      <td>same as gfx950</td>
+      <td class="warn">correct, but see the driver caveat</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <span class="label">gfx942 caveat — a driver limitation, not an allocator one</span>
+  <p>On the MI308X box, granting a single peer with <code>hipMemSetAccess</code> re-maps the buffer <em>in the owner's own page tables</em> as <code>AMDGPU_PTE_SYSTEM | MTYPE_UC</code>. The owner's access to its own HBM drops from 2671.5 GB/s to 55.8 GB/s — PCIe speed — and stays there. One grant is enough; more cost nothing further. Confirmed by tracing <code>amdgpu:amdgpu_vm_set_ptes</code> against a size-fingerprinted buffer, and the pages never move.</p>
+  <p>It is specific to the VMM path: <code>hipMalloc</code> + <code>hipDeviceEnablePeerAccess</code> for all 7 peers keeps full bandwidth on the same box, because that goes through KFD (<code>hsaKmtMapMemoryToGPUNodes</code>) while <code>hipMemSetAccess</code> reaches libdrm's <code>amdgpu_bo_va_op</code>. That host also has <code>CONFIG_PCI_P2PDMA</code> and <code>CONFIG_DMABUF_MOVE_NOTIFY</code> unset, both of which the DRM cross-device path wants. gfx950 on a 6.8 kernel is unaffected.</p>
+</div>
+
+<h2 id="measured"><span class="num">05</span>What it measures</h2>
+
+<p>The example is a one-shot all-to-all over the window, written twice — once in HIP, once in Triton, each a single self-contained script with no build step. Every rank pushes its chunk into every peer's receive slot; the aggregate counts only the <code>world_size-1</code> chunks that actually leave the device.</p>
+
+<pre><code>torchrun --nnodes=1 --nproc_per_node=8 all2all_hip.py    --chunk-kib 256
+torchrun --nnodes=1 --nproc_per_node=8 all2all_triton.py --chunk-kib 256</code></pre>
+
+<h3>Aggregate bandwidth, 4 MiB per peer</h3>
+<table>
+  <thead><tr><th>ranks</th><th class="num">gfx950</th><th class="num">gfx1250</th><th class="num">gfx942</th></tr></thead>
+  <tbody>
+    <tr><td>2</td><td class="num">107.8 GB/s</td><td class="num">514.6 GB/s</td><td class="num">54.1 GB/s</td></tr>
+    <tr><td>4</td><td class="num">500&ndash;567 GB/s</td><td class="num">1705.1 GB/s</td><td class="num">112.2 GB/s</td></tr>
+    <tr><td>8</td><td class="num">1746&ndash;1874 GB/s</td><td class="num">&mdash;</td><td class="num">184.8 GB/s</td></tr>
+  </tbody>
+</table>
+<h3>256 KiB per peer, where launch and barrier cost still shows</h3>
+<table>
+  <thead><tr><th>ranks</th><th class="num">gfx950</th><th class="num">gfx1250</th><th class="num">gfx942</th></tr></thead>
+  <tbody>
+    <tr><td>2</td><td class="num">76&ndash;84 GB/s</td><td class="num">92.9 GB/s</td><td class="num">40.3 GB/s</td></tr>
+    <tr><td>4</td><td class="num">461&ndash;485 GB/s</td><td class="num">516.8 GB/s</td><td class="num">139.4 GB/s</td></tr>
+    <tr><td>8</td><td class="num">1522&ndash;1829 GB/s</td><td class="num">&mdash;</td><td class="num">250.0 GB/s</td></tr>
+  </tbody>
+</table>
+<p class="small">Ranges are across repeats; anything above 2 ranks moves 6&ndash;13% run to run, so read single-value columns as &plusmn;10% too. The gfx1250 box has 4 GPUs, hence no 8-rank row.</p>
+
+<h3>Three findings worth keeping</h3>
+<ul>
+  <li><b>Grid shape dominates addressing.</b> One block per destination rank left all but <code>world_size</code> CUs idle and could not keep enough writes in flight to cover interconnect latency: 15.8 GB/s on gfx1250 at 4 MiB. Slicing each chunk across <code>blocks_per_peer</code> blocks is worth ~2.5&times; on gfx950 and ~95&times; on gfx1250.</li>
+  <li><b>The pointer array costs almost nothing.</b> An earlier revision implemented the flat <code>base + peer*stride</code> form too, purely to measure it. Within 0.2% on 8&times;gfx950 with the array ahead as often as behind; on an idle gfx1250 the flat form was consistently ahead by a near-constant 0.3&ndash;0.6 &micro;s. Constant in absolute terms means a per-block cost — the array's dependent load sits on the critical path before the first store issues — <em>not</em> a per-byte one. Stage 1 gives up a fixed sliver of launch-to-first-store latency and nothing per byte.</li>
+  <li><b>Small-message Triton numbers measure the launcher.</b> Timing the launch call alone: 2.90 &micro;s (HIP pybind) vs 9.01 &micro;s (Triton 3.7) on gfx950, and 2.44&ndash;3.03 vs 10.84&ndash;10.94 &micro;s (Triton 3.8) on gfx1250. Launches are async, so an iteration costs <code>max(kernel, launch)</code> — the gfx1250 Triton row is pinned near 12 &micro;s at both 256 KiB and 1 MiB despite 4&times; the data. Real uses amortise it with graphs or a persistent kernel.</li>
+</ul>
+
+<h2 id="roadmap"><span class="num">06</span>Roadmap and known gaps</h2>
+
+<figure>
+<div class="svgbox">
+<svg viewBox="0 0 860 128" role="img" aria-label="Three stage roadmap">
+  <rect class="hl" x="10" y="14" width="266" height="96" rx="6"/>
+  <text class="t" x="26" y="38">Stage 1 &#8212; this PR</text>
+  <text x="26" y="58">torch's pointer-array model</text>
+  <text x="26" y="74">HIP VMM, fabric or fd probe</text>
+  <text class="s" x="26" y="94">no shmem, no cco, no bootstrap</text>
+
+  <rect class="box" x="296" y="14" width="266" height="96" rx="6"/>
+  <text class="t" x="312" y="38">Stage 2</text>
+  <text x="312" y="58">cco owns the window</text>
+  <text x="312" y="74">ccoMemImport / WindowRegister</text>
+  <text class="s" x="312" y="94">winBase + stride4G, LSA-rank indexing</text>
+
+  <rect class="box" x="582" y="14" width="268" height="96" rx="6"/>
+  <text class="t" x="598" y="38">Stage 3</text>
+  <text x="598" y="58">scale-out and SDMA</text>
+  <text x="598" y="74">ibgdaWin, multi-node groups</text>
+  <text class="s" x="598" y="94">world_within_direct_access turns false</text>
+</svg>
+</div>
+<figcaption>The staging is described in <a href="https://github.com/ROCm/mori/issues/557">ROCm/mori#557</a>. Every serious library builds the flat window underneath anyway — NCCL's <code>ncclGetLsaPointer</code> is <code>add4G(lsaFlatBase, peer*stride4G) + offset</code>, and mori's <code>ccoWindowDevice</code> is <code>winBase + ((uint64_t)peerLsaRank * stride4G &lt;&lt; 32) + offset</code> — which is exactly why stage 1 declines to invent a fourth one.</figcaption>
+</figure>
+
+<h3>Open gaps</h3>
+<ul>
+  <li><b>Teardown is disabled by default</b> — the one item blocking the draft. Releasing a rendezvous'd window segfaults at <code>world_size &ge; 4</code> (2 ranks are fine) somewhere in the unmap/release path. Not <code>is_finalizing()</code>, not interpreter shutdown (it faults on an explicit <code>del</code>), not fixed by quiescing with a barrier. Mappings are leaked meanwhile, which is cheap — symmetric buffers are few and long-lived. <code>MORI_SYMM_TEARDOWN=1</code> re-enables it. Stage 2 may dissolve the problem entirely, since cco would own unmap ordering.</li>
+  <li><b>No device-side barrier.</b> <code>dist.barrier()</code> stands in until the signal pad is wired up.</li>
+  <li><b>No multi-node group.</b> <code>world_within_direct_access()</code> returns true unconditionally — correct today, since there is no RDMA path, and it is stage 3 that makes it conditional.</li>
+  <li><b>Backend-specific torch ops.</b> Things like <code>all_to_all_nd</code> dispatch on a hardcoded <code>if backend == "NCCL"</code>, so third-party backends get the generic ops only.</li>
+</ul>
+
+<h3>Open questions for review</h3>
+<ol>
+  <li>Is a <code>CppExtension</code> in <code>setup.py</code> the right home? It is the only mori target that links libtorch, and torch's <code>build_ext</code> is what derives the ABI tag, the pybind11 copy and <code>_GLIBCXX_USE_CXX11_ABI</code>.</li>
+  <li>For stage 2, is <code>ccoMemImport</code> / <code>ccoWindowRegister</code> overload C the intended path for a torch-owned allocation, and should <code>ccoGetPeerPtr</code> get a Cython binding? How should <code>rendezvous(group_name)</code> map onto <code>ccoCommCreate</code>'s up-front <code>perRankVmmSize</code>?</li>
+  <li>Should <code>barrier()</code> be implemented over the signal pad with P2P stores now, or wait for cco's signal pool in stage 3?</li>
+  <li>Any idea on the teardown segfault at <code>world_size &ge; 4</code>?</li>
+  <li>How should this relate to <a href="https://github.com/pytorch/pytorch/pull/192524">pytorch#192524</a>, which enables <code>NCCLSymmetricMemory</code> (RCCL) support on ROCm upstream?</li>
+</ol>
+
+<footer>
+  <p>Source: <a href="https://github.com/ROCm/mori/pull/544">ROCm/mori#544</a> &middot; RFC: <a href="https://github.com/ROCm/mori/issues/557">ROCm/mori#557</a> &middot; example and full measurement notes: <code>examples/torch_symm_all2all/README.md</code> on the PR branch.</p>
+  <p>torch line references are against <code>pytorch/pytorch@main</code> as read on 2026-08-17; measurements are from 8&times;gfx950 (torch 2.10 / Triton 3.7), 4&times;gfx1250 (torch 2.11 / Triton 3.8) and 8&times;gfx942.</p>
+</footer>
+
+</div>
+</body>
+</html>
