@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>A torch SymmetricMemory backend for mori</title>
-<meta name="description" content="Why mori registers itself as a torch SymmetricMemory backend, how it is designed, and how one implementation covers gfx942, gfx950 and gfx1250.">
+<meta name="description" content="mori as a torch SymmetricMemory backend: the pointer-array programming model torch defines, the LSA base-plus-offset window RCCL and mori's cco define, and how one HIP VMM implementation covers gfx942, gfx950 and gfx1250.">
 <style>
 :root {
   --bg: #ffffff;
@@ -105,7 +105,7 @@ footer { border-top: 1px solid var(--line); margin-top: 60px; padding-top: 20px;
 <header class="hero">
   <div class="wrap">
     <h1>A torch SymmetricMemory backend for mori</h1>
-    <p class="sub">Making <code>symm_mem.empty()</code> / <code>symm_mem.rendezvous()</code> work on AMD GPUs through mori, on plain HIP VMM — one implementation that covers fd-based and fabric-based handle exchange, gfx942 through gfx1250.</p>
+    <p class="sub">The question this PR answers is a programming-model one: <b>how does a kernel name a peer's memory?</b> torch's symmetric memory says "index a pointer array"; RCCL and mori's cco say "add an offset to a base" — the LSA window. Stage 1 ships the first, on plain HIP VMM, across fd-based and fabric-based parts from gfx942 to gfx1250.</p>
     <div class="chips">
       <a class="chip hot" href="https://github.com/ROCm/mori/pull/544">ROCm/mori#544</a>
       <a class="chip" href="https://github.com/ROCm/mori/issues/557">RFC #557 &middot; stage plan</a>
@@ -119,12 +119,13 @@ footer { border-top: 1px solid var(--line); margin-top: 60px; padding-top: 20px;
 
 <div class="callout">
   <span class="label">In one paragraph</span>
-  <p>PyTorch has a device-side one-sided memory abstraction — <b>SymmetricMemory</b> — that a growing set of collectives, Triton kernels and inductor passes are written against. Its ROCm story is thin: torch's built-in CUDA implementation compiles its fabric path out entirely on ROCm and hardcodes POSIX file-descriptor sharing. This PR registers <b>mori</b> as a torch SymmetricMemory backend so that torch's own entry points allocate and rendezvous through mori, with a per-device capability probe that picks fabric handles where the hardware and driver have them and file descriptors where they do not. It is deliberately scoped to torch's pointer-array model (stage 1); the flat-window and scale-out layers arrive as mori's cco window in stages 2 and 3.</p>
+  <p>PyTorch has a device-side one-sided memory abstraction — <b>SymmetricMemory</b> — that a growing set of collectives, Triton kernels and inductor passes are written against. It exposes peers exactly one way: as an <b>array of base pointers</b>, one per rank. Underneath, every serious library instead builds a <b>flat VMM window</b> and addresses peers arithmetically — what RCCL and NCCL call <b>LSA</b> (load/store accessible) memory, and what mori's cco calls <code>ccoWindowDevice</code>. This PR registers mori as a torch SymmetricMemory backend and implements the first model faithfully, on plain HIP VMM, with a per-device probe that picks fabric handles where they exist and file descriptors where they do not. The window it builds is already flat and evenly strided — the LSA view is physically there — but naming it is stage 2's job, and it should be named by cco, not invented a fourth time in an allocator.</p>
 </div>
 
 <div class="toc">
   <ol>
     <li><a href="#why">Why do this at all</a></li>
+    <li><a href="#model">The programming model: pointer array vs LSA window</a></li>
     <li><a href="#matters">Why it matters</a></li>
     <li><a href="#design">How it is designed</a></li>
     <li><a href="#unify">One backend, three architectures</a></li>
@@ -168,7 +169,118 @@ ptrs = hdl.buffer_ptrs_dev                          # or the device pointer arra
 <p>This backend sidesteps the invariant instead of fighting it: every allocation is an <em>independent</em> HIP VMM allocation with its own rendezvous, and <code>free()</code> is purely local, so divergent free order is harmless. The extension links neither <code>mori_shmem</code> nor <code>mori_application</code>, and needs no mori bootstrap — torch's own process group is the only rendezvous channel.</p>
 <p>That is an argument against the <em>heap</em>, not against cco. cco's <code>ccoMemImport</code> and <code>ccoWindowRegister</code> already alias an externally-owned HIP VMM allocation into cco's flat slot — the header's own example is "e.g. a torch.symm_mem buffer" — which is exactly the shape of the handoff for stage 2.</p>
 
-<h2 id="matters"><span class="num">02</span>Why it matters</h2>
+<h2 id="model"><span class="num">02</span>The programming model: pointer array vs LSA window</h2>
+
+<p>Everything above is plumbing. The part that a kernel author actually feels — and the part that decides what stage 2 has to look like — is the addressing model: <b>given a peer rank and a byte offset, how do I get a dereferenceable address?</b> There are exactly two answers in use, and this PR implements the first one.</p>
+
+<figure>
+<div class="svgbox">
+<svg viewBox="0 0 860 236" role="img" aria-label="Pointer array addressing versus LSA flat window addressing">
+  <text class="t" x="16" y="20">A &#8212; pointer array (torch native, this PR)</text>
+  <text class="t" x="452" y="20">B &#8212; LSA window (RCCL / mori cco, stage 2)</text>
+
+  <rect class="hl" x="16" y="32" width="390" height="40" rx="5"/>
+  <text x="30" y="57">dst = peers[peer] + offset</text>
+  <rect class="box" x="452" y="32" width="392" height="40" rx="5"/>
+  <text x="466" y="57">dst = winBase + peer*stride + offset</text>
+
+  <text class="s" x="16" y="92">one dependent load from a world_size-entry table</text>
+  <text class="s" x="452" y="92">pure address arithmetic, no memory touched</text>
+
+  <rect class="box" x="16" y="106" width="90" height="34" rx="4"/><text x="30" y="128">peers[0]</text>
+  <rect class="box" x="116" y="106" width="90" height="34" rx="4"/><text x="130" y="128">peers[1]</text>
+  <rect class="hl"  x="216" y="106" width="90" height="34" rx="4"/><text x="230" y="128">peers[2]</text>
+  <rect class="box" x="316" y="106" width="90" height="34" rx="4"/><text x="330" y="128">peers[3]</text>
+  <path class="acc" d="M261 140 L261 168" marker-end="url(#c)"/>
+
+  <rect class="box" x="452" y="106" width="98" height="34" rx="4"/><text class="s" x="466" y="127">slot 0</text>
+  <rect class="box" x="550" y="106" width="98" height="34" rx="4"/><text class="s" x="564" y="127">slot 1</text>
+  <rect class="hl"  x="648" y="106" width="98" height="34" rx="4"/><text class="s" x="662" y="127">slot 2</text>
+  <rect class="box" x="746" y="106" width="98" height="34" rx="4"/><text class="s" x="760" y="127">slot 3</text>
+  <path class="ln" d="M452 150 L452 158"/><path class="ln" d="M844 150 L844 158"/><path class="ln" d="M452 154 L844 154"/>
+  <text class="s" x="560" y="172">one contiguous VA reservation, uniform stride</text>
+
+  <rect class="box" x="16" y="168" width="390" height="52" rx="5"/>
+  <text class="s" x="30" y="188">peer slots may live anywhere in the VA space;</text>
+  <text class="s" x="30" y="204">the table is the only thing that relates them</text>
+  <rect class="box" x="452" y="182" width="392" height="38" rx="5"/>
+  <text class="s" x="466" y="202">the relation IS the address; no table exists</text>
+
+  <defs>
+    <marker id="c" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="currentColor" opacity=".9"/>
+    </marker>
+  </defs>
+</svg>
+</div>
+<figcaption>The two models are not different optimisations of the same thing — they make different demands on the allocator. A is satisfiable by any mapping, however scattered. B requires that all N slots were reserved together, in order, at one stride.</figcaption>
+</figure>
+
+<h3>Model A — the pointer array, which is what torch's interface <em>is</em></h3>
+<p>torch's <code>SymmetricMemory</code> C++ interface has exactly two accessors for peer memory: <code>get_buffer_ptrs()</code> and <code>get_buffer_ptrs_dev()</code>. There is no slot in it for a base and a stride. So every backend, whatever it does internally, ends up publishing an N-entry table:</p>
+<pre><code>// HIP — examples/torch_symm_all2all/all2all_hip.py
+__global__ void All2AllPushPtrs(const uint4* src, void** __restrict__ peers, ...) {
+  auto* dst = reinterpret_cast&lt;uint4*&gt;(static_cast&lt;char*&gt;(peers[peer])   // &lt;-- table load
+                                       + rank_id * chunk_bytes);
+  ...
+}</code></pre>
+<pre><code># Triton — the idiom torch's own symmetric-memory kernels use
+peers = peer_ptrs.to(tl.pointer_type(tl.uint64))
+dst   = tl.load(peers + peer).to(tl.pointer_type(tl.int32))          # &lt;-- table load
+dst  += rank_id.to(tl.int64) * chunk</code></pre>
+<p>The virtue of this model is that it demands nothing of the allocator. Peer slots can be at unrelated addresses, which is precisely what torch's own CUDA backend produces — it maps each peer's memory separately — and what an <code>hipIpc</code>-based backend would produce too. NVSHMEM's torch backend goes further and <em>rotates</em> the slots so that a peer's index in the array is not its PE id at all. The array is the lowest common denominator, and that is why torch chose it.</p>
+
+<h3>Model B — the LSA window: base pointer plus offset</h3>
+<p>The other model gives up mapping freedom in exchange for arithmetic addressing. Reserve one VA range covering every rank's slot at a uniform stride, and a peer address becomes a computation, with no table and no load:</p>
+<pre><code>// NCCL / RCCL device API — LSA = "load/store accessible"
+void* p = ncclGetLsaPointer(win, offset, lsaPeer);   // NULL if peer is outside the LSA team
+void* q = ncclGetPeerPointer(win, offset, peer);     // world-team index, same window
+// implemented underneath as: add4G(lsaFlatBase, peer * stride4G) + offset
+
+// mori cco — include/mori/cco/cco.hpp, struct ccoWindowDevice
+//   peer_va = winBase + ((uint64_t)peerLsaRank * stride4G &lt;&lt; 32) + offset
+//   local   = winBase + ((uint64_t)lsaRank     * stride4G &lt;&lt; 32) + offset
+struct ccoWindowDevice { char* winBase; uint32_t stride4G; int lsaRank; ccoIbgdaWin ibgdaWin; };</code></pre>
+<p>Two details in that snippet carry most of the model. The stride is <b>4 GiB-quantised</b> — <code>stride4G</code> is <code>perRankSize &gt;&gt; 32</code>, so the multiply is a 32-bit op and the shift is free — and the peer index is an <b>LSA rank, not a world rank</b>. LSA is a <em>team</em>: the set of peers this GPU can reach with ordinary loads and stores. Ranks outside it are not addressable this way at all — <code>ncclGetPeerPointer</code> returns NULL for them, and cco routes them through <code>ibgdaWin</code> instead. The addressing model and the transport boundary are the same concept.</p>
+
+<h3>Side by side</h3>
+<table>
+  <thead><tr><th>&nbsp;</th><th>A &middot; pointer array</th><th>B &middot; LSA window</th></tr></thead>
+  <tbody>
+    <tr><td>Peer address</td><td><code>peers[p] + offset</code></td><td><code>base + p*stride + offset</code></td></tr>
+    <tr><td>Cost per block</td><td>one dependent global load before the first store can issue</td><td>a few ALU ops from values already in registers</td></tr>
+    <tr><td>Uniformity</td><td>a loaded value; scalarises only if the compiler can prove <code>p</code> uniform</td><td>scalar arithmetic off a uniform base</td></tr>
+    <tr><td>Allocator demand</td><td>none — any mapping, any addresses</td><td>one contiguous VA reservation, all slots, uniform stride</td></tr>
+    <tr><td>Size granularity</td><td>exact</td><td>quantised (4 GiB per rank in cco/NCCL)</td></tr>
+    <tr><td>Team semantics</td><td>none; one flat world plus a <code>world_within_direct_access()</code> boolean</td><td>first-class — LSA team, cross-node team, rail team; NULL outside</td></tr>
+    <tr><td>Scale-out story</td><td>outside the model</td><td>the complement of the LSA team, via the same window handle</td></tr>
+    <tr><td>Defined by</td><td>torch (<code>buffer_ptrs</code> / <code>buffer_ptrs_dev</code>)</td><td>RCCL (<code>ncclGetLsaPointer</code>), mori (<code>ccoWindowDevice</code>)</td></tr>
+    <tr><td>In this PR</td><td class="ok">yes</td><td>stage 2</td></tr>
+  </tbody>
+</table>
+
+<h3>Which is faster, and by how much</h3>
+<p>Less than the framing suggests. An earlier revision of the example implemented <em>both</em>, over the same allocation, purely to measure the difference:</p>
+<ul>
+  <li>8&times;gfx950: within <b>0.2%</b>, with the array ahead as often as behind (1909.4 vs 1912.0 GB/s at 4 MiB; 1814.5 vs 1803.7 on a second box).</li>
+  <li>Idle 4&times;gfx1250: the flat form consistently ahead by a near-constant <b>0.3&ndash;0.6 &micro;s</b> — 2% at 4 MiB, 3&ndash;7% at 256 KiB.</li>
+</ul>
+<p>Constant in absolute terms is the tell: this is a <b>per-block</b> cost, not a per-byte one. The dependent load sits on the critical path between block launch and the first store, and once the stores are in flight the two models are the same instruction stream. So the pointer array costs a fixed sliver of launch-to-first-store latency and nothing per byte, which is why stage 1 can ship it without apology — and why the argument for the LSA window is about <em>expressiveness</em>, not bandwidth.</p>
+
+<h3>So why bother with the window at all</h3>
+<p>Because the things the array cannot express are the things that come next:</p>
+<ul>
+  <li><b>Teams.</b> "Which peers can I load/store, and what do I do about the rest" is one question with one answer in the LSA model, and no answer in torch's.</li>
+  <li><b>Signals and barriers in the same address space.</b> cco's LSA barrier is a <code>{byte-offset, count}</code> pair into the DevComm's own window, so it inherits peer addressing for free rather than needing a second table.</li>
+  <li><b>Scale-out.</b> <code>ibgdaWin</code> hangs off the same window struct: a kernel decides load/store vs RDMA per peer, with one handle.</li>
+  <li><b>Register economy at scale.</b> A table is O(world_size) of memory a kernel keeps re-reading; a base and a stride are two values, whatever the world size.</li>
+</ul>
+<div class="callout">
+  <span class="label">Why this PR does <em>not</em> expose it anyway</span>
+  <p>The backend's rendezvous already produces exactly this layout — one flat span, uniform stride, self-slot aliased so the stride is regular. Publishing <code>base</code> and <code>stride</code> would be a two-line change, and it was deliberately reverted, because it would make a <em>fourth</em> definition of the same window (NCCL's, cco's, torch's-backend-internal, and mori-allocator's) that a later cco integration would have to unwind. Stage 2 hands the allocation to <code>ccoMemImport</code> / <code>ccoWindowRegister</code> and lets <code>ccoWindowDevice</code> be the name for it — with kernels reaching it through cco's accessors, not through a torch handle attribute.</p>
+</div>
+
+<h2 id="matters"><span class="num">03</span>Why it matters</h2>
 
 <div class="grid2">
   <div class="card">
@@ -191,7 +303,7 @@ ptrs = hdl.buffer_ptrs_dev                          # or the device pointer arra
 
 <p style="margin-top:18px">Concretely, once <code>set_backend("MORI")</code> works: torch's symmetric-memory collectives, MemPool-allocated symmetric tensors, and any Triton kernel written against the pointer array all run on AMD hardware through mori's allocation path — and mori gains a place to put fabric handles, its window layout, and later its RDMA and SDMA transports where torch code will actually reach them.</p>
 
-<h2 id="design"><span class="num">03</span>How it is designed</h2>
+<h2 id="design"><span class="num">04</span>How it is designed</h2>
 
 <h3>Where the code sits</h3>
 <figure>
@@ -292,14 +404,14 @@ ptrs = hdl.buffer_ptrs_dev                          # or the device pointer arra
 <ul>
   <li><b>No signal pad by default.</b> <code>barrier()</code>, <code>put_signal()</code> and <code>wait_signal()</code> are unimplemented and raise, so reserving torch's 9216-byte pad would waste a whole 2 MiB physical page per window (backing is 2 MiB-paged) for something nothing can use. <code>MORI_SYMM_SIGNAL_PAD=ON</code> reserves it, and <code>mori.allocator.signal_pad_supported()</code> reports which build you have — torch's <em>own</em> collectives synchronise through that pad, so they need the flag.</li>
   <li><b>No multicast.</b> HIP exposes no multicast API, so <code>has_multicast_support()</code> is false and <code>multimem_*</code> is out.</li>
-  <li><b>No flat-window API.</b> The pointers are strided, and exposing <code>base + rank*stride</code> would be a third definition of a layout cco already owns. Stage 2 instead.</li>
+  <li><b>No LSA window API.</b> The pointers <em>are</em> strided, so <code>base + rank*stride</code> would work today — but shipping it here would be a fourth definition of a layout cco already owns. <a href="#model">&sect;02</a>; stage 2 instead.</li>
   <li><b>Teardown off by default.</b> See <a href="#roadmap">gaps</a>.</li>
 </ul>
 
 <h3>Lifetime</h3>
 <p>Two details that are easy to get wrong. The allocator singleton is intentionally immortal, because <code>register_availability()</code> parks a reference in a libtorch-owned registry that outlives the extension's statics. And release is driven from an <code>atexit</code> hook registered on import, not from destructors: by the time static destructors run, HIP is already unwinding and every VMM call segfaults, while <code>is_finalizing()</code> still reports false.</p>
 
-<h2 id="unify"><span class="num">04</span>One backend, three architectures</h2>
+<h2 id="unify"><span class="num">05</span>One backend, three architectures</h2>
 
 <p>The interesting design question is not "how do I support gfx1250" — it is how a single build behaves correctly on parts whose capabilities differ, against a HIP whose spelling of those capabilities is still moving. Three mechanisms do the work.</p>
 
@@ -366,7 +478,7 @@ typedef struct { unsigned char data[64]; } hipMemFabricHandle_compat_t;
   <p>It is specific to the VMM path: <code>hipMalloc</code> + <code>hipDeviceEnablePeerAccess</code> for all 7 peers keeps full bandwidth on the same box, because that goes through KFD (<code>hsaKmtMapMemoryToGPUNodes</code>) while <code>hipMemSetAccess</code> reaches libdrm's <code>amdgpu_bo_va_op</code>. That host also has <code>CONFIG_PCI_P2PDMA</code> and <code>CONFIG_DMABUF_MOVE_NOTIFY</code> unset, both of which the DRM cross-device path wants. gfx950 on a 6.8 kernel is unaffected.</p>
 </div>
 
-<h2 id="measured"><span class="num">05</span>What it measures</h2>
+<h2 id="measured"><span class="num">06</span>What it measures</h2>
 
 <p>The example is a one-shot all-to-all over the window, written twice — once in HIP, once in Triton, each a single self-contained script with no build step. Every rank pushes its chunk into every peer's receive slot; the aggregate counts only the <code>world_size-1</code> chunks that actually leave the device.</p>
 
@@ -396,11 +508,11 @@ torchrun --nnodes=1 --nproc_per_node=8 all2all_triton.py --chunk-kib 256</code><
 <h3>Three findings worth keeping</h3>
 <ul>
   <li><b>Grid shape dominates addressing.</b> One block per destination rank left all but <code>world_size</code> CUs idle and could not keep enough writes in flight to cover interconnect latency: 15.8 GB/s on gfx1250 at 4 MiB. Slicing each chunk across <code>blocks_per_peer</code> blocks is worth ~2.5&times; on gfx950 and ~95&times; on gfx1250.</li>
-  <li><b>The pointer array costs almost nothing.</b> An earlier revision implemented the flat <code>base + peer*stride</code> form too, purely to measure it. Within 0.2% on 8&times;gfx950 with the array ahead as often as behind; on an idle gfx1250 the flat form was consistently ahead by a near-constant 0.3&ndash;0.6 &micro;s. Constant in absolute terms means a per-block cost — the array's dependent load sits on the critical path before the first store issues — <em>not</em> a per-byte one. Stage 1 gives up a fixed sliver of launch-to-first-store latency and nothing per byte.</li>
+  <li><b>The pointer array costs almost nothing</b> against the LSA form — a fixed per-block sliver, no per-byte penalty. Numbers and reasoning in <a href="#model">&sect;02</a>.</li>
   <li><b>Small-message Triton numbers measure the launcher.</b> Timing the launch call alone: 2.90 &micro;s (HIP pybind) vs 9.01 &micro;s (Triton 3.7) on gfx950, and 2.44&ndash;3.03 vs 10.84&ndash;10.94 &micro;s (Triton 3.8) on gfx1250. Launches are async, so an iteration costs <code>max(kernel, launch)</code> — the gfx1250 Triton row is pinned near 12 &micro;s at both 256 KiB and 1 MiB despite 4&times; the data. Real uses amortise it with graphs or a persistent kernel.</li>
 </ul>
 
-<h2 id="roadmap"><span class="num">06</span>Roadmap and known gaps</h2>
+<h2 id="roadmap"><span class="num">07</span>Roadmap and known gaps</h2>
 
 <figure>
 <div class="svgbox">
@@ -424,7 +536,7 @@ torchrun --nnodes=1 --nproc_per_node=8 all2all_triton.py --chunk-kib 256</code><
   <text class="s" x="598" y="94">world_within_direct_access turns false</text>
 </svg>
 </div>
-<figcaption>The staging is described in <a href="https://github.com/ROCm/mori/issues/557">ROCm/mori#557</a>. Every serious library builds the flat window underneath anyway — NCCL's <code>ncclGetLsaPointer</code> is <code>add4G(lsaFlatBase, peer*stride4G) + offset</code>, and mori's <code>ccoWindowDevice</code> is <code>winBase + ((uint64_t)peerLsaRank * stride4G &lt;&lt; 32) + offset</code> — which is exactly why stage 1 declines to invent a fourth one.</figcaption>
+<figcaption>The staging is described in <a href="https://github.com/ROCm/mori/issues/557">ROCm/mori#557</a>. Stage 1 ships one addressing model, torch's; stage 2 is where the second one arrives, and arrives as cco's window rather than as a fourth private copy of the same arithmetic (<a href="#model">&sect;02</a>).</figcaption>
 </figure>
 
 <h3>Open gaps</h3>
